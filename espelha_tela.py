@@ -1,0 +1,2806 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+"""EspelhaTela - visualizador e controle desktop da tela de um Android.
+
+Abre uma janela propria (sem navegador, sem servidor, sem porta de rede) com a tela do
+aparelho. Feito para conviver com a automacao Maestro.
+
+POR QUE EXISTE
+    O espelho antigo subia o adb 1.0.39 do Minimal ADB. Dois adb de versoes diferentes
+    derrubam o servidor um do outro (o cliente mais novo mata o servidor mais velho e
+    sobe o seu), e o Maestro perdia a sessao com "protocol fault" no meio do flow.
+
+COMO EVITA ISSO
+    - Usa o MESMO adb do Android SDK que o Maestro usa (platform-tools). Nunca o do
+      Minimal ADB, salvo se nao houver outro, e mesmo assim avisa.
+    - NAO sobe nem derruba servidor adb: nao chama start-server nem kill-server.
+    - So captura com a janela visivel e nao pausada (minimizada = aparelho em paz).
+    - O controle (toque, teclado, Voltar/Inicio/Recentes, volume) esta sempre ligado: o
+      que voce faz na janela acontece no aparelho. Nunca mexe no servidor adb.
+
+Estilo Vysor: barra lateral com acoes, tela do aparelho no centro, rodape com status.
+Uso:
+    python espelha_tela.py                    # abre a janela
+    python espelha_tela.py --serial 0123abcd  # aparelho especifico
+Atalhos: Ctrl+S salva a captura, F11 tela cheia, F9 barra lateral.
+"""
+
+import argparse
+import datetime
+import json
+import os
+import posixpath
+import queue
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import threading
+import time
+import tempfile
+import zlib
+from urllib.parse import quote
+
+# No .exe sem console (--windowed) nao ha stdout/stderr; evita quebrar em print/argparse.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w")
+
+import tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog, ttk
+
+try:
+    from PIL import Image, ImageTk
+except ImportError:
+    Image = ImageTk = None
+
+try:
+    import av  # decodificador H.264 (FFmpeg) do modo video
+except Exception:
+    av = None
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import adb_servidor  # noqa: E402  (porta do servidor adb, aviso de wrapper)
+import seletor  # noqa: E402  (seletor de identificador para o Maestro)
+
+VERSAO = "1.0"
+SEM_JANELA = 0x08000000 if os.name == "nt" else 0
+
+
+def caminho_recurso(nome):
+    """Arquivo ao lado do script ou, no .exe, dentro do pacote extraido."""
+    base = getattr(sys, "_MEIPASS", None) or os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, nome)
+
+
+def aplica_icone(janela):
+    """Troca o icone padrao (pena do Tk / Python) pelo do EspelhaTela."""
+    try:
+        ico = caminho_recurso("icone.ico")
+        if os.path.isfile(ico):
+            janela.iconbitmap(ico)
+    except Exception:
+        pass
+
+
+def q(caminho):
+    """Aspas simples seguras para o shell do aparelho."""
+    return "'" + caminho.replace("'", "'\\''") + "'"
+
+
+def tamanho_legivel(n):
+    n = float(n)
+    for un in ("B", "KB", "MB", "GB"):
+        if n < 1024 or un == "GB":
+            return ("%d %s" % (n, un)) if un == "B" else ("%.1f %s" % (n, un))
+        n /= 1024.0
+
+
+# --------------------------------------------------------------------------- adb
+def achar_adb(informado=None):
+    """Mesma ordem de preferencia do Maestro: SDK primeiro, Minimal ADB so por ultimo."""
+    candidatos = []
+    if informado:
+        candidatos.append(informado)
+    if os.environ.get("ADB"):
+        candidatos.append(os.environ["ADB"])
+    no_path = shutil.which("adb")
+    if no_path:
+        candidatos.append(no_path)
+    aqui = os.path.dirname(sys.executable if getattr(sys, "frozen", False) else os.path.abspath(__file__))
+    candidatos += [os.path.join(aqui, "adb.exe"), os.path.join(aqui, "platform-tools", "adb.exe")]  # versao portatil
+    for var in ("ANDROID_SDK_ROOT", "ANDROID_HOME"):
+        if os.environ.get(var):
+            candidatos.append(os.path.join(os.environ[var], "platform-tools", "adb.exe"))
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        candidatos.append(os.path.join(local, "Android", "Sdk", "platform-tools", "adb.exe"))
+    vistos = []
+    for c in candidatos:
+        if c and os.path.isfile(c) and c not in vistos:
+            vistos.append(c)
+    if not vistos:
+        return None
+    bons = [c for c in vistos if "minimal adb" not in c.lower()]
+    return (bons or vistos)[0]
+
+
+def rodar(cmd, timeout=15, binario=False):
+    r = subprocess.run(cmd, capture_output=True, timeout=timeout, creationflags=SEM_JANELA)
+    return r.returncode, (r.stdout if binario else r.stdout.decode("utf-8", "replace")), r.stderr.decode("utf-8", "replace")
+
+
+def versao_adb(adb):
+    try:
+        _, out, _ = rodar([adb, "version"], timeout=8)
+        m = re.search(r"Android Debug Bridge version ([\d.]+)", out)
+        return m.group(1) if m else "?"
+    except Exception:
+        return "?"
+
+
+def adb_em_execucao():
+    """Caminhos dos adb.exe ja rodando (so no Windows). Serve para avisar de conflito."""
+    if os.name != "nt":
+        return []
+    try:
+        _, out, _ = rodar(
+            [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_Process -Filter \"Name='adb.exe'\" | "
+                "ForEach-Object { $_.ExecutablePath }",
+            ],
+            timeout=15,
+        )
+        return sorted({l.strip() for l in out.splitlines() if l.strip()})
+    except Exception:
+        return []
+
+
+def listar_aparelhos(adb):
+    """Somente leitura. Nao inicia servidor de proposito; se nao houver, o proprio cliente
+    adb sobe o dele (mesma versao do cliente), como qualquer adb faria."""
+    try:
+        _, out, _ = rodar([adb, "devices"], timeout=10)
+    except Exception:
+        return []
+    itens = []
+    for linha in out.splitlines()[1:]:
+        p = linha.split()
+        if len(p) >= 2:
+            itens.append({"serial": p[0], "estado": p[1]})
+    return itens
+
+
+# --------------------------------------------------------------------- captura
+MODOS_CAPTURA = {
+    "Video - Rapido": ("video", "rapido"),
+    "Video - Equilibrado": ("video", "equilibrado"),
+    "Video - Nitido": ("video", "nitido"),
+    "Quadros (leve)": ("quadros", "rapido"),
+}
+PERFIS_VIDEO = {  # lado maior em pixels (0 = nativo) e taxa de bits
+    "rapido": (640, "2M"),
+    "equilibrado": (960, "4M"),
+    "nitido": (0, "8M"),
+}
+
+
+def parar_gravacao_remota(adb, serial):
+    """Encerra um screenrecord que tenha ficado vivo no aparelho (matar o adb local nao basta)."""
+    try:
+        rodar([adb, "-s", serial, "shell", "pids=$(pidof screenrecord 2>/dev/null); [ -n \"$pids\" ] && kill $pids; true"], timeout=8)
+    except Exception:
+        pass
+
+
+class Injetor:
+    """Canal de entrada sempre aberto: um processo Java minusculo (injetor/) rodando no aparelho.
+
+    Cada toque vira uma linha de texto numa conexao ja aberta, em vez de um `adb shell input tap`
+    (processo novo + JVM a cada clique, de 0,5 a 1 s em aparelhos fracos). Funciona em qualquer
+    aparelho Android 4.1+ em que o usuario shell possa injetar eventos (mesma tecnica do scrcpy).
+    Se nao subir, o app cai para o `adb shell input`, mais lento mas universal."""
+
+    REMOTO = "/data/local/tmp/espelha-input.jar"
+
+    def __init__(self, adb):
+        self.adb = adb
+        self.serial = ""
+        self.proc = None
+        self.pronto = False
+        self.erro = ""
+        self.ultimo_erro = ""
+        self.t_erro = 0.0
+        self.iniciando = False
+        self.lock = threading.Lock()
+
+    def ok(self, serial):
+        return bool(self.pronto and self.serial == serial and self.proc is not None and self.proc.poll() is None)
+
+    def garantir(self, serial):
+        """Sobe o injetor em segundo plano, sem travar a interface."""
+        if not serial or self.iniciando or self.ok(serial):
+            return
+        if self.erro and self.serial == serial and time.time() - self.t_erro < 30:
+            return  # falhou ha pouco neste aparelho: tenta de novo so depois de 30 s
+        self.iniciando = True
+        threading.Thread(target=self._inicia, args=(serial,), daemon=True).start()
+
+    def _inicia(self, serial):
+        try:
+            self.parar()
+            self.serial, self.erro, self.pronto = serial, "", False
+            jar = caminho_recurso("espelha-input.jar")
+            if not os.path.isfile(jar):
+                self.erro = "espelha-input.jar ausente"
+                return
+            try:
+                rc, _, err = rodar([self.adb, "-s", serial, "push", jar, self.REMOTO], timeout=30)
+            except Exception as e:  # noqa: BLE001
+                self.erro = "push do injetor falhou: %s" % str(e)[:60]
+                return
+            if rc != 0:
+                self.erro = "push do injetor falhou: " + err.strip()[:80]
+                return
+            proc = subprocess.Popen(
+                [self.adb, "-s", serial, "shell", "CLASSPATH=%s exec app_process / espelhatela.Injector" % self.REMOTO],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=SEM_JANELA,
+            )
+            self.proc = proc
+
+            def leitor():
+                for bruto in proc.stdout:
+                    linha = bruto.decode("utf-8", "replace").strip()
+                    if linha == "READY":
+                        self.pronto = True
+                    elif linha.startswith("ERR init"):
+                        self.erro = linha[:120]
+                        self.t_erro = time.time()
+                    elif linha.startswith("ERR"):
+                        self.ultimo_erro = linha[:120]
+
+            threading.Thread(target=leitor, daemon=True).start()
+            t0 = time.time()
+            while not self.pronto and not self.erro and proc.poll() is None and time.time() - t0 < 10:
+                time.sleep(0.05)
+            if not self.pronto and not self.erro:
+                self.erro = "injetor nao respondeu"
+        finally:
+            if self.erro:
+                self.t_erro = time.time()
+            self.iniciando = False
+
+    def envia(self, linha, serial):
+        if not self.ok(serial):
+            return False
+        try:
+            with self.lock:
+                self.proc.stdin.write((linha + "\n").encode("utf-8"))
+                self.proc.stdin.flush()
+            return True
+        except Exception:
+            self.pronto = False
+            return False
+
+    def parar(self):
+        p, self.proc, self.pronto = self.proc, None, False
+        if p is not None:
+            try:
+                p.stdin.write(b"q\n")
+                p.stdin.flush()
+            except Exception:
+                pass
+            try:
+                p.kill()
+            except Exception:
+                pass
+
+
+class Captura(threading.Thread):
+    """Entrega a tela em segundo plano. So mexe no aparelho quando `ativo` e verdadeiro.
+
+    Dois modos: "video" (screenrecord H.264 decodificado aqui, fluido) e "quadros" (screencap
+    quadro a quadro, mais leve). Se o video nao funcionar no aparelho, cai para quadros sozinho."""
+
+    def __init__(self, adb, serial, intervalo_min, modo="video", perfil="rapido"):
+        super().__init__(daemon=True)
+        self.adb = adb
+        self.serial = serial
+        self.intervalo_min = intervalo_min
+        self.modo = modo
+        self.perfil = perfil
+        self.ativo = True
+        self.parar = False
+        self.frame = None  # PIL.Image RGB (no video, em resolucao reduzida)
+        self.seq = 0
+        self.ms = 0
+        self.erro = ""
+        self.gzip_ok = True
+        self.video_ok = av is not None
+        self.via = "quadros"
+        self.nota = ""
+        self.dev_size = None  # resolucao real do aparelho (para mapear cliques)
+        self._dev_serial = ""
+        self.aparelhos = []
+        self.ips = []  # aparelhos de rede (ip:porta) a reconectar se o servidor adb reiniciar
+        self._ult_lista = 0.0
+        self.t_frame = 0.0
+
+    def trocar(self, serial):
+        self.serial = serial
+        self.frame = None
+        self.seq = 0
+        self.erro = ""
+        self.dev_size = None
+
+    # ---- resolucao do aparelho
+    def dims(self):
+        if self.dev_size and self._dev_serial == self.serial:
+            return self.dev_size
+        try:
+            _, out, _ = rodar([self.adb, "-s", self.serial, "shell", "wm size"], timeout=10)
+            achados = re.findall(r"(Override|Physical) size:\s*(\d+)x(\d+)", out)
+            if achados:
+                pref = [a for a in achados if a[0] == "Override"] or achados
+                self.dev_size = (int(pref[-1][1]), int(pref[-1][2]))
+                self._dev_serial = self.serial
+        except Exception:
+            pass
+        return self.dev_size
+
+    # ---- modo quadros
+    def _comando(self):
+        base = [self.adb] + (["-s", self.serial] if self.serial else [])
+        if self.gzip_ok:
+            return base + ["exec-out", "screencap | gzip -1"]
+        return base + ["exec-out", "screencap"]
+
+    def _decodifica(self, dados):
+        if self.gzip_ok:
+            dados = zlib.decompress(dados, 16 + zlib.MAX_WBITS)
+        w, h, fmt = struct.unpack("<III", dados[:12])
+        corpo = len(dados) - 4 * w * h
+        if corpo not in (12, 16) or fmt != 1:
+            raise ValueError("formato de screencap inesperado (w=%d h=%d fmt=%d)" % (w, h, fmt))
+        return Image.frombuffer("RGBA", (w, h), dados[corpo:], "raw", "RGBA", 0, 1).convert("RGB")
+
+    def _passo_quadros(self):
+        self.via = "quadros"
+        t0 = time.time()
+        try:
+            rc, out, err = rodar(self._comando(), timeout=20, binario=True)
+            if rc != 0 or not out:
+                msg = err.strip() or "captura vazia"
+                if self.gzip_ok and "gzip" in msg.lower():
+                    self.gzip_ok = False  # ROM sem gzip: usa o bruto
+                    return
+                raise RuntimeError(msg)
+            try:
+                img = self._decodifica(out)
+            except zlib.error:
+                self.gzip_ok = False
+                return
+            self.frame = img
+            self.t_frame = time.time()
+            self.ms = int((time.time() - t0) * 1000)
+            self.erro = ""
+            self.seq += 1
+        except Exception as e:  # noqa: BLE001
+            self.erro = str(e)[:160]
+            time.sleep(2.0)
+        resto = self.intervalo_min - (time.time() - t0)
+        if resto > 0:
+            time.sleep(resto)
+
+    # ---- modo video
+    def _stream(self, size, taxa):
+        """Um fluxo de screenrecord (ate 180 s). Devolve 'interrompido', 'ok' ou 'falhou'."""
+        serial, estado0 = self.serial, (self.modo, self.perfil)
+        parar_gravacao_remota(self.adb, serial)
+        cmd = [self.adb, "-s", serial, "exec-out", "screenrecord", "--output-format=h264", "--bit-rate", taxa, "--time-limit", "180"]
+        if size:
+            cmd += ["--size", size]
+        cmd.append("-")
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=SEM_JANELA, bufsize=0)
+        estado = {"frames": 0, "erro": "", "stderr": b""}
+
+        def drena_erro():  # sem isso o pipe de erro pode encher e travar o screenrecord
+            try:
+                while True:
+                    bloco = proc.stderr.read(1024)
+                    if not bloco:
+                        break
+                    estado["stderr"] = (estado["stderr"] + bloco)[-2048:]
+            except Exception:
+                pass
+
+        def leitor():
+            try:
+                codec = av.CodecContext.create("h264", "r")
+                try:
+                    codec.thread_count = 1  # sem fila de threads: menos atraso
+                except Exception:
+                    pass
+                while True:
+                    dados = proc.stdout.read(65536)
+                    if not dados:
+                        break
+                    try:
+                        for pkt in codec.parse(dados):
+                            for fr in codec.decode(pkt):
+                                self.frame = fr.to_image()
+                                self.t_frame = time.time()
+                                self.erro = ""
+                                self.seq += 1
+                                estado["frames"] += 1
+                    except Exception as e:  # noqa: BLE001  pacote corrompido: segue com o proximo
+                        estado["erro"] = str(e)[:120]
+            except Exception as e:  # noqa: BLE001
+                estado["erro"] = str(e)[:120]
+
+        th = threading.Thread(target=leitor, daemon=True)
+        te = threading.Thread(target=drena_erro, daemon=True)
+        th.start()
+        te.start()
+        self.via = "video"
+        inicio = time.time()
+        motivo = "fim"
+        while True:
+            if self.parar or not self.ativo or (self.modo, self.perfil) != estado0 or self.serial != serial:
+                motivo = "interrompido"
+                break
+            if proc.poll() is not None:
+                break
+            if not th.is_alive():  # decodificador morreu com o fluxo ainda aberto: reinicia
+                break
+            if estado["frames"] == 0 and time.time() - inicio > 12:
+                motivo = "falhou"
+                break
+            time.sleep(0.1)
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        th.join(timeout=1.0)
+        threading.Thread(target=parar_gravacao_remota, args=(self.adb, serial), daemon=True).start()
+        if motivo == "interrompido":
+            return "interrompido"
+        if estado["frames"] > 0:
+            return "ok"
+        detalhe = estado["stderr"].decode("utf-8", "replace").strip().splitlines()
+        self.erro_video = (detalhe[-1] if detalhe else estado["erro"] or "sem imagem")[:120]
+        return "falhou"
+
+    def _ciclo_video(self):
+        dims = self.dims()
+        maxd, taxa = PERFIS_VIDEO.get(self.perfil, PERFIS_VIDEO["rapido"])
+        tentativas = []
+        if dims and maxd and max(dims) > maxd:
+            w, h = dims
+            k = maxd / float(max(w, h))
+            tentativas.append("%dx%d" % (max(16, int(round(w * k / 16.0)) * 16), max(16, int(round(h * k / 16.0)) * 16)))
+        tentativas.append(None)  # tamanho nativo, para encoders que recusam o reduzido
+        for size in tentativas:
+            if self.parar or not self.ativo or self.modo != "video":
+                return
+            r = self._stream(size, taxa)
+            if r in ("ok", "interrompido"):
+                return
+        self.video_ok = False
+        self.nota = "video indisponivel: %s" % getattr(self, "erro_video", "?")
+
+    # ---- laco principal
+    def _lista_loop(self):
+        """Atualiza a lista de aparelhos em paralelo (o modo video prende o laco principal)."""
+        ultimo = 0.0
+        while not self.parar:
+            self.aparelhos = listar_aparelhos(self.adb)
+            if self.ips and time.time() - ultimo > 30:  # servidor reiniciado = aparelhos de rede somem da lista
+                ultimo = time.time()
+                presentes = {a["serial"] for a in self.aparelhos}
+                for ip in list(self.ips):
+                    if ip not in presentes and not self.parar:
+                        try:
+                            rodar([self.adb, "connect", ip], timeout=8)
+                        except Exception:  # noqa: BLE001
+                            pass
+            for _ in range(50):
+                if self.parar:
+                    return
+                time.sleep(0.1)
+
+    def run(self):
+        threading.Thread(target=self._lista_loop, daemon=True).start()
+        while not self.parar:
+            if not self.ativo:
+                time.sleep(0.2)
+                continue
+            if not self.serial:
+                ok = [a for a in self.aparelhos if a["estado"] == "device"]
+                if len(ok) == 1:
+                    self.serial = ok[0]["serial"]
+                else:
+                    self.erro = "varios aparelhos: escolha um na lista" if ok else (motivo_sem_aparelho(self.aparelhos) or "nenhum aparelho conectado")
+                    time.sleep(1.5)
+                    continue
+            try:
+                if self.modo == "video" and self.video_ok:
+                    self._ciclo_video()
+                else:
+                    self._passo_quadros()
+            except Exception as e:  # noqa: BLE001
+                self.erro = str(e)[:160]
+                time.sleep(2.0)
+
+
+class Dica:
+    """Balao ao passar o mouse sobre um widget: titulo em negrito e uma linha de detalhe."""
+
+    def __init__(self, widget, titulo, detalhe="", atraso=350):
+        self.w, self.titulo, self.detalhe, self.atraso = widget, titulo, detalhe, atraso
+        self.job = None
+        self.top = None
+        widget.bind("<Enter>", self._entra, add="+")
+        widget.bind("<Leave>", self._sai, add="+")
+        widget.bind("<ButtonPress>", self._sai, add="+")
+
+    def _entra(self, _e=None):
+        self._sai()
+        self.job = self.w.after(self.atraso, self._mostra)
+
+    def _mostra(self):
+        self.job = None
+        try:
+            top = tk.Toplevel(self.w)
+            top.wm_overrideredirect(True)
+            top.attributes("-topmost", True)
+            caixa = tk.Frame(top, bg="#0f0f10", highlightthickness=1, highlightbackground="#4a4a50")
+            caixa.pack()
+            tk.Label(caixa, text=self.titulo, bg="#0f0f10", fg="#ffffff", font=("Segoe UI", 9, "bold"), padx=10, pady=(5 if self.detalhe else 5)).pack(anchor="w")
+            if self.detalhe:
+                tk.Label(caixa, text=self.detalhe, bg="#0f0f10", fg="#a9a9b0", font=("Segoe UI", 8), padx=10, wraplength=260, justify="left").pack(anchor="w", pady=(0, 5))
+            top.update_idletasks()
+            x = self.w.winfo_rootx() + self.w.winfo_width() + 8
+            y = self.w.winfo_rooty() + max(0, (self.w.winfo_height() - top.winfo_height()) // 2)
+            if x + top.winfo_width() > self.w.winfo_screenwidth():  # sem espaco a direita
+                x = self.w.winfo_rootx() - top.winfo_width() - 8
+            top.geometry("+%d+%d" % (x, y))
+            self.top = top
+        except tk.TclError:
+            self.top = None
+
+    def _sai(self, _e=None):
+        if self.job:
+            try:
+                self.w.after_cancel(self.job)
+            except tk.TclError:
+                pass
+            self.job = None
+        if self.top is not None:
+            try:
+                self.top.destroy()
+            except tk.TclError:
+                pass
+            self.top = None
+
+
+def kb_para_mb(kb):
+    return kb / 1024.0
+
+
+def parse_amostra(saida):
+    """Saida de `cat /proc/meminfo | head -6; echo ---; ps -A -o PID,RSS,NAME || ps`.
+
+    Le o cabecalho do ps (PID, RSS, NAME), entao serve ao toybox (Android 7+) e ao toolbox antigo."""
+    antes, _, depois = saida.partition("---")
+    mem = {}
+    for l in antes.splitlines():
+        m = re.match(r"\s*(\w+):\s+(\d+)\s*kB", l)
+        if m:
+            mem[m.group(1)] = int(m.group(2))
+    if mem and "MemAvailable" not in mem:  # kernels antigos nao trazem MemAvailable
+        mem["MemAvailable"] = mem.get("MemFree", 0) + mem.get("Buffers", 0) + mem.get("Cached", 0)
+    procs = {}
+    ip = ir = None
+    for l in depois.splitlines():
+        cols = l.split()
+        if not cols:
+            continue
+        if ip is None:
+            if "PID" in cols and "RSS" in cols:
+                ip, ir = cols.index("PID"), cols.index("RSS")
+            continue
+        if len(cols) <= max(ip, ir) or not (cols[ip].isdigit() and cols[ir].isdigit()):
+            continue
+        rss, nome = int(cols[ir]), cols[-1]  # NAME e a ultima coluna
+        if rss > 0 and not nome.startswith("["):
+            antigo = procs.get(nome)
+            if antigo:  # varios processos com o mesmo nome: soma
+                procs[nome] = (antigo[0], antigo[1] + rss, antigo[2] + 1)
+            else:
+                procs[nome] = (int(cols[ip]), rss, 1)
+    return mem, procs
+
+
+def parse_pss(saida):
+    """Secao 'Total PSS by process' do `dumpsys meminfo` (valores em K, separador de milhar variavel)."""
+    res = {}
+    dentro = False
+    for l in saida.splitlines():
+        if l.startswith("Total PSS by process"):
+            dentro = True
+            continue
+        if dentro:
+            if not l.strip():
+                break
+            m = re.match(r"\s*([\d.,]+)\s*(?:K|kB):\s+(.+?)\s+\(pid (\d+)", l)
+            if m:
+                res[m.group(2).strip()] = int(re.sub(r"\D", "", m.group(1)))
+    return res
+
+
+def parse_detalhe(saida):
+    linhas = saida.splitlines()
+    out, ativo = [], False
+    for l in linhas:
+        if "App Summary" in l or l.strip() == "Objects":
+            ativo = True
+        if ativo and l.strip():
+            out.append(l.rstrip())
+    return "\n".join(out[:40]) if out else "\n".join(linhas[:40])
+
+
+class MonitorMemoria:
+    """Gerenciador de tarefas do aparelho: memoria por processo, historico e detalhe.
+
+    Modo rapido (padrao): `ps` + /proc/meminfo, cerca de 0,8 s por leitura, quase sem custo no
+    aparelho. PSS preciso (dumpsys meminfo, ~6 s num POS de entrada) e detalhe por app so sob demanda."""
+
+    INTERVALOS = {"2 s": 2, "3 s": 3, "5 s": 5, "10 s": 10, "30 s": 30}
+
+    def __init__(self, app):
+        self.app = app
+        self.cap = app.cap
+        self.q = queue.Queue()
+        self.hist = {}      # nome -> [(t, rss_kb)]
+        self.base = {}      # nome -> primeiro rss visto (para o delta)
+        self.pss = {}       # nome -> pss_kb (medicao precisa)
+        self.dados = {}     # nome -> (pid, rss_kb, n)
+        self.sist = []      # [(t, usada_kb)]
+        self.mem = {}
+        self.intervalo = 3
+        self.pausado = False
+        self.parar = False
+        self.ordem = ("mem", True)
+        self.selecionado = None
+        self.ocupado = False
+
+        w = self.win = tk.Toplevel(app.root)
+        w.title("Monitor de memoria - %s" % (self.cap.serial or "aparelho"))
+        aplica_icone(w)
+        w.configure(bg=BG)
+        w.geometry("820x700")
+        w.minsize(640, 520)
+        w.protocol("WM_DELETE_WINDOW", self.fechar)
+
+        # --- resumo do aparelho
+        cima = tk.Frame(w, bg=BG)
+        cima.pack(fill="x", padx=12, pady=(10, 4))
+        self.lb_resumo = tk.Label(cima, text="lendo...", bg=BG, fg=FG, anchor="w", font=("Segoe UI", 10, "bold"))
+        self.lb_resumo.pack(fill="x")
+        self.barra = tk.Canvas(cima, height=14, bg=BG2, highlightthickness=0)
+        self.barra.pack(fill="x", pady=(4, 0))
+
+        # --- controles
+        ctl = tk.Frame(w, bg=BG)
+        ctl.pack(fill="x", padx=12, pady=6)
+        self.filtro = tk.StringVar()
+        ent = tk.Entry(ctl, textvariable=self.filtro, bg=BG2, fg=FG, insertbackground=FG, relief="flat", width=22)
+        ent.pack(side="left", ipady=3)
+        Dica(ent, "Filtro", "Digite parte do nome do processo")
+        self.filtro.trace_add("write", lambda *_: self.redesenha_tabela())
+        self.cb_int = ttk.Combobox(ctl, state="readonly", width=6, values=list(self.INTERVALOS))
+        self.cb_int.set("3 s")
+        self.cb_int.pack(side="left", padx=(8, 0))
+        self.cb_int.bind("<<ComboboxSelected>>", lambda e: setattr(self, "intervalo", self.INTERVALOS[self.cb_int.get()]))
+        Dica(self.cb_int, "Intervalo de leitura", "Leituras rapidas (ps), baixo impacto no aparelho")
+        self.var_ativa = tk.BooleanVar(value=bool(app.config.get("memoria_ativa", True)))
+        self.ck = ttk.Checkbutton(ctl, text="Medicao ligada", variable=self.var_ativa, command=self.liga_desliga)
+        self.ck.pack(side="left", padx=(8, 0))
+        Dica(self.ck, "Habilitar / desabilitar a medicao", "Desligada: nenhuma leitura e feita no aparelho. A escolha fica lembrada")
+        self.bt_pss = ttk.Button(ctl, text="Medir PSS", command=self.mede_pss)
+        self.bt_pss.pack(side="left", padx=(8, 0))
+        Dica(self.bt_pss, "Medicao precisa (PSS)", "dumpsys meminfo: mais exato que o RSS, mas leva uns 6 s e pesa no aparelho")
+        self.bt_det = ttk.Button(ctl, text="Detalhar app", command=self.detalha)
+        self.bt_det.pack(side="left", padx=(8, 0))
+        Dica(self.bt_det, "Detalhar app selecionado", "Java heap, nativo, graficos, Views e Activities (util para achar vazamento)")
+        self.bt_kill = ttk.Button(ctl, text="Encerrar app", command=self.encerra)
+        self.bt_kill.pack(side="left", padx=(8, 0))
+        Dica(self.bt_kill, "Encerrar app", "am force-stop no pacote selecionado (pede confirmacao)")
+        bt_csv = ttk.Button(ctl, text="Exportar CSV", command=self.exporta)
+        bt_csv.pack(side="right")
+        Dica(bt_csv, "Exportar historico", "Salva todas as leituras em Imagens\\EspelhaTela")
+
+        # --- tabela
+        corpo = tk.Frame(w, bg=BG)
+        corpo.pack(fill="both", expand=True, padx=12)
+        est = ttk.Style()
+        est.configure("Treeview", background=BG2, fieldbackground=BG2, foreground=FG, rowheight=22, borderwidth=0)
+        est.configure("Treeview.Heading", background="#34343a", foreground=FG, relief="flat")
+        est.map("Treeview", background=[("selected", ACENTO)], foreground=[("selected", "#ffffff")])
+        cols = ("nome", "pid", "mem", "pss", "pct", "delta")
+        self.tv = ttk.Treeview(corpo, columns=cols, show="headings", selectmode="browse", height=12)
+        titulos = {"nome": "Processo", "pid": "PID", "mem": "RSS (MB)", "pss": "PSS (MB)", "pct": "% RAM", "delta": "Variacao (MB)"}
+        larg = {"nome": 300, "pid": 60, "mem": 90, "pss": 90, "pct": 70, "delta": 110}
+        for c in cols:
+            self.tv.heading(c, text=titulos[c], command=lambda c=c: self.ordena(c))
+            self.tv.column(c, width=larg[c], anchor="w" if c == "nome" else "e")
+        sb = ttk.Scrollbar(corpo, orient="vertical", command=self.tv.yview)
+        self.tv.configure(yscrollcommand=sb.set)
+        self.tv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.tv.tag_configure("favorito", foreground="#b9a3ff")
+        self.tv.tag_configure("cresce", foreground="#ffb454")
+        self.tv.bind("<<TreeviewSelect>>", self.escolheu)
+
+        # --- graficos e detalhe
+        base = tk.Frame(w, bg=BG)
+        base.pack(fill="x", padx=12, pady=(8, 4))
+        self.g_sis = tk.Canvas(base, height=110, bg=BG2, highlightthickness=0)
+        self.g_sis.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self.g_app = tk.Canvas(base, height=110, bg=BG2, highlightthickness=0)
+        self.g_app.pack(side="left", fill="x", expand=True, padx=(6, 0))
+        self.txt = tk.Text(w, height=9, bg=BG2, fg=FG, relief="flat", font=("Consolas", 9), padx=8, pady=6)
+        self.txt.pack(fill="x", padx=12, pady=(0, 6))
+        self.txt.insert("1.0", "Selecione um app e clique em Detalhar para ver heap, graficos, Views e Activities.")
+        self.txt.configure(state="disabled")
+        self.rodape = tk.Label(w, text="", bg=BG, fg=FG2, anchor="w", font=("Segoe UI", 9), padx=12)
+        self.rodape.pack(fill="x", pady=(0, 8))
+
+        self.liga_desliga(inicial=True)
+        threading.Thread(target=self._coleta, daemon=True).start()
+        w.after(250, self._consome)
+
+    # ---- coleta (thread) -> fila -> UI
+    def _adb(self, *args, timeout=15):
+        return rodar([self.cap.adb, "-s", self.cap.serial] + list(args), timeout=timeout)
+
+    def _coleta(self):
+        while not self.parar:
+            t0 = time.time()
+            if not self.pausado and self.cap.serial:
+                try:
+                    _, out, err = self._adb("shell", "cat /proc/meminfo | head -6; echo ---; ps -A -o PID,RSS,NAME 2>/dev/null || ps")
+                    if "---" in out:
+                        self.q.put(("amostra", t0, out))
+                    else:
+                        self.q.put(("erro", (err or out or "sem resposta")[:120]))
+                except Exception as e:  # noqa: BLE001
+                    self.q.put(("erro", str(e)[:120]))
+            fim = t0 + self.intervalo
+            while not self.parar and time.time() < fim:
+                time.sleep(0.2)
+
+    def _consome(self):
+        if self.parar:
+            return
+        try:
+            while not self.q.empty():
+                tipo, *resto = self.q.get_nowait()
+                if tipo == "amostra":
+                    self._amostra(resto[0], resto[1])
+                elif tipo == "erro":
+                    self.rodape.configure(text="erro: " + resto[0], fg=PERIGO)
+                elif tipo == "pss":
+                    self.pss = resto[0]
+                    self.ocupado = False
+                    self.bt_pss.configure(state="normal", text="Medir PSS")
+                    self.rodape.configure(text="PSS medido para %d processos" % len(self.pss), fg=FG2)
+                    self.redesenha_tabela()
+                elif tipo == "detalhe":
+                    self._mostra_texto(resto[0])
+                    self.bt_det.configure(state="normal", text="Detalhar app")
+        except Exception as e:  # noqa: BLE001
+            self.rodape.configure(text="erro: %s" % e, fg=PERIGO)
+        self.win.after(250, self._consome)
+
+    def _amostra(self, t, saida):
+        mem, procs = parse_amostra(saida)
+        self.mem, self.dados = mem, procs
+        total, disp = mem.get("MemTotal", 0), mem.get("MemAvailable", 0)
+        usada = max(0, total - disp)
+        self.sist = (self.sist + [(t, usada)])[-600:]
+        for nome, (pid, rss, n) in procs.items():
+            self.base.setdefault(nome, rss)
+            self.hist.setdefault(nome, []).append((t, rss))
+            if len(self.hist[nome]) > 600:
+                del self.hist[nome][:-600]
+        if total:
+            pct = usada * 100.0 / total
+            self.lb_resumo.configure(text="RAM: %.0f MB usados de %.0f MB (%.0f%%)  -  disponivel %.0f MB  -  livre %.0f MB" % (kb_para_mb(usada), kb_para_mb(total), pct, kb_para_mb(disp), kb_para_mb(mem.get("MemFree", 0))))
+            self.barra.update_idletasks()
+            w = max(self.barra.winfo_width(), 10)
+            self.barra.delete("all")
+            cor = PERIGO if pct > 90 else ("#ffb454" if pct > 75 else ACENTO)
+            self.barra.create_rectangle(0, 0, w * pct / 100.0, 14, fill=cor, width=0)
+        self.rodape.configure(text="atualizado %s  -  %d processos  -  RSS conta memoria compartilhada; use Medir PSS para o valor exato" % (time.strftime("%H:%M:%S", time.localtime(t)), len(procs)), fg=FG2)
+        self.redesenha_tabela()
+        self.grafico(self.g_sis, [v for _, v in self.sist], "RAM usada do aparelho (MB)", ACENTO)
+        self.grafico_app()
+
+    # ---- tabela
+    def ordena(self, col):
+        atual, desc = self.ordem
+        self.ordem = (col, (not desc) if atual == col else (col != "nome"))
+        self.redesenha_tabela()
+
+    def redesenha_tabela(self):
+        total = self.mem.get("MemTotal", 0) or 1
+        f = self.filtro.get().strip().lower()
+        linhas = []
+        for nome, (pid, rss, n) in self.dados.items():
+            if f and f not in nome.lower():
+                continue
+            pss = self.pss.get(nome)
+            delta = rss - self.base.get(nome, rss)
+            linhas.append({"nome": nome, "pid": pid, "mem": rss, "pss": pss if pss is not None else -1, "pct": rss, "delta": delta, "n": n})
+        col, desc = self.ordem
+        linhas.sort(key=lambda r: (r["nome"].lower() if col == "nome" else r[col]), reverse=desc)
+        existentes = set(self.tv.get_children())
+        for r in linhas[:300]:
+            nome = r["nome"]
+            tags = []
+            if nome.split(":")[0] in favoritos(self.app.config):
+                tags.append("favorito")
+            if r["delta"] > 20 * 1024:
+                tags.append("cresce")
+            vals = (nome + (" (x%d)" % r["n"] if r["n"] > 1 else ""), r["pid"], "%.1f" % kb_para_mb(r["mem"]), "-" if r["pss"] < 0 else "%.1f" % kb_para_mb(r["pss"]), "%.1f%%" % (r["mem"] * 100.0 / total), "%+.1f" % kb_para_mb(r["delta"]))
+            if nome in existentes:
+                self.tv.item(nome, values=vals, tags=tags)
+                existentes.discard(nome)
+            else:
+                self.tv.insert("", "end", iid=nome, values=vals, tags=tags)
+        for sobra in existentes:
+            self.tv.delete(sobra)
+        for i, r in enumerate(linhas[:300]):
+            self.tv.move(r["nome"], "", i)
+
+    def escolheu(self, _e=None):
+        sel = self.tv.selection()
+        self.selecionado = sel[0] if sel else None
+        self.grafico_app()
+
+    # ---- graficos
+    def grafico(self, cv, serie_kb, titulo, cor):
+        cv.update_idletasks()
+        w, h = max(cv.winfo_width(), 50), max(cv.winfo_height(), 50)
+        cv.delete("all")
+        cv.create_text(8, 8, anchor="nw", text=titulo, fill=FG2, font=("Segoe UI", 8))
+        if len(serie_kb) < 2:
+            return
+        mb = [kb_para_mb(v) for v in serie_kb]
+        lo, hi = min(mb), max(mb)
+        if hi - lo < 1:
+            hi = lo + 1
+        x0, y0, x1, y1 = 8, 26, w - 8, h - 8
+        pts = []
+        for i, v in enumerate(mb):
+            pts += [x0 + (x1 - x0) * i / (len(mb) - 1), y1 - (y1 - y0) * (v - lo) / (hi - lo)]
+        cv.create_line(*pts, fill=cor, width=2)
+        cv.create_text(w - 8, 8, anchor="ne", text="%.0f - %.0f MB" % (lo, hi), fill=FG2, font=("Segoe UI", 8))
+
+    def grafico_app(self):
+        nome = self.selecionado
+        serie = [v for _, v in self.hist.get(nome, [])] if nome else []
+        self.grafico(self.g_app, serie, ("RSS de %s (MB)" % nome) if nome else "Selecione um processo na tabela", "#ffb454")
+
+    # ---- acoes
+    def liga_desliga(self, inicial=False):
+        ativa = bool(self.var_ativa.get())
+        self.pausado = not ativa
+        self.ck.configure(text="Medicao ligada" if ativa else "Medicao desligada")
+        for b in (self.bt_pss, self.bt_det):
+            b.configure(state="normal" if ativa else "disabled")
+        if not inicial:
+            self.app.config["memoria_ativa"] = ativa
+            salvar_config(self.app.config)
+        self.rodape.configure(text="medicao ligada" if ativa else "medicao desligada: nenhuma leitura e feita no aparelho", fg=FG2)
+
+    def _mostra_texto(self, texto):
+        self.txt.configure(state="normal")
+        self.txt.delete("1.0", "end")
+        self.txt.insert("1.0", texto)
+        self.txt.configure(state="disabled")
+
+    def mede_pss(self):
+        if self.ocupado:
+            return
+        self.ocupado = True
+        self.bt_pss.configure(state="disabled", text="Medindo (~6 s)...")
+
+        def trabalho():
+            try:
+                _, out, _ = self._adb("shell", "dumpsys", "meminfo", timeout=90)
+                self.q.put(("pss", parse_pss(out)))
+            except Exception as e:  # noqa: BLE001
+                self.q.put(("pss", {}))
+                self.q.put(("erro", "PSS: %s" % str(e)[:100]))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def detalha(self):
+        nome = self.selecionado
+        if not nome:
+            return messagebox.showinfo("Monitor de memoria", "Selecione um processo na tabela.", parent=self.win)
+        pid = self.dados.get(nome, (None,))[0]
+        self.bt_det.configure(state="disabled", text="Lendo...")
+
+        def trabalho():
+            try:
+                _, out, _ = self._adb("shell", "dumpsys", "meminfo", str(pid), timeout=30)
+                self.q.put(("detalhe", "%s (pid %s)\n%s" % (nome, pid, parse_detalhe(out))))
+            except Exception as e:  # noqa: BLE001
+                self.q.put(("detalhe", "falha: %s" % e))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def encerra(self):
+        nome = self.selecionado
+        if not nome:
+            return messagebox.showinfo("Monitor de memoria", "Selecione um processo na tabela.", parent=self.win)
+        pacote = nome.split(":")[0]
+        if "." not in pacote or not re.fullmatch(r"[A-Za-z0-9._]+", pacote):
+            return messagebox.showwarning("Monitor de memoria", "%s nao parece um app (sem nome de pacote)." % nome, parent=self.win)
+        if not messagebox.askyesno("Encerrar app", "Encerrar %s no aparelho %s?\n\n(am force-stop)" % (pacote, self.cap.serial), parent=self.win):
+            return
+
+        def trabalho():
+            try:
+                self._adb("shell", "am", "force-stop", pacote, timeout=15)
+                self.q.put(("erro", "enviado force-stop para " + pacote))
+            except Exception as e:  # noqa: BLE001
+                self.q.put(("erro", str(e)[:100]))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def exporta(self):
+        if not self.hist:
+            return messagebox.showinfo("Monitor de memoria", "Ainda nao ha leituras.", parent=self.win)
+        pasta = os.path.join(os.path.expanduser("~"), "Pictures", "EspelhaTela")
+        os.makedirs(pasta, exist_ok=True)
+        caminho = os.path.join(pasta, "memoria-%s-%s.csv" % (self.cap.serial or "aparelho", datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
+        with open(caminho, "w", encoding="utf-8", newline="") as f:
+            f.write("horario;processo;rss_kb\n")
+            for nome, serie in self.hist.items():
+                for t, kb in serie:
+                    f.write("%s;%s;%d\n" % (datetime.datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S"), nome, kb))
+            for t, kb in self.sist:
+                f.write("%s;%s;%d\n" % (datetime.datetime.fromtimestamp(t).strftime("%Y-%m-%d %H:%M:%S"), "[RAM usada do aparelho]", kb))
+        self.rodape.configure(text="exportado: " + caminho, fg=FG2)
+
+    def fechar(self):
+        self.parar = True
+        self.app.mem = None
+        self.win.destroy()
+
+
+RX_LS = re.compile(r"^([\-dlbcps])([rwxsStT\-]{9})[.+@]?\s+(?:\d+\s+)?(\S+)\s+(\S+)\s+(?:(\d+)\s+)?(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})(?::\d{2})?\s+(.*)$")  # tolera o ls do toolbox (sem contagem de links)
+ATALHOS = [
+    ("Armazenamento (/sdcard)", "/sdcard"),
+    ("Download", "/sdcard/Download"),
+    ("Imagens (DCIM)", "/sdcard/DCIM"),
+    ("Fotos (Pictures)", "/sdcard/Pictures"),
+    ("Dados dos apps (Android/data)", "/sdcard/Android/data"),
+    ("Temporario (/data/local/tmp)", "/data/local/tmp"),
+    ("Raiz (/)", "/"),
+]
+SEGUROS = ("/sdcard", "/storage", "/data/local/tmp")  # onde excluir/renomear e permitido
+
+
+def parse_ls(saida):
+    """Linhas de `ls -la` do toybox -> [(nome, tipo, tamanho, data, perm)]."""
+    itens = []
+    for l in saida.splitlines():
+        m = RX_LS.match(l.strip())
+        if not m:
+            continue
+        tp, perm, _dono, _grupo, tam, dia, hora, resto = m.groups()
+        nome = resto.split(" -> ")[0].strip()
+        if nome in (".", ".."):
+            continue
+        tipo = {"d": "dir", "l": "link", "-": "file"}.get(tp)
+        if tipo is None:
+            continue
+        itens.append((nome, tipo, int(tam or 0), "%s %s" % (dia, hora), tp + perm))
+    return itens
+
+
+class GerenciadorArquivos:
+    """Navegador de arquivos do aparelho: listar, baixar, enviar, abrir, criar pasta, renomear, excluir."""
+
+    def __init__(self, app):
+        self.app = app
+        self.cap = app.cap
+        self.q = queue.Queue()
+        self.caminho = "/sdcard"
+        self.hist = []
+        self.itens = {}
+        self.ocupado = ""
+        self.parar = False
+        self.ordem = ("nome", False)
+
+        w = self.win = tk.Toplevel(app.root)
+        w.title("Arquivos - %s" % (self.cap.serial or "aparelho"))
+        aplica_icone(w)
+        w.configure(bg=BG)
+        w.geometry("900x620")
+        w.minsize(700, 440)
+        w.protocol("WM_DELETE_WINDOW", self.fechar)
+
+        barra = tk.Frame(w, bg=BG)
+        barra.pack(fill="x", padx=10, pady=(10, 4))
+        self.bt_volta = self._bt(barra, "\u25C0", "Voltar", "Volta para a pasta anterior", self.volta, 3)
+        self._bt(barra, "\u2B06", "Subir", "Vai para a pasta de cima", self.sobe, 3)
+        self._bt(barra, "\u27F3", "Atualizar", "Lista a pasta de novo", lambda: self.vai(self.caminho, False), 3)
+        self.var_cam = tk.StringVar(value=self.caminho)
+        ent = tk.Entry(barra, textvariable=self.var_cam, bg=BG2, fg=FG, insertbackground=FG, relief="flat")
+        ent.pack(side="left", fill="x", expand=True, padx=8, ipady=4)
+        ent.bind("<Return>", lambda e: self.vai(self.var_cam.get().strip() or "/", True))
+        Dica(ent, "Caminho", "Digite uma pasta do aparelho e tecle Enter")
+        self.cb = ttk.Combobox(barra, state="readonly", width=28, values=[a for a, _ in ATALHOS])
+        self.cb.pack(side="left")
+        self.cb.set("Atalhos...")
+        self.cb.bind("<<ComboboxSelected>>", self.atalho)
+        Dica(self.cb, "Atalhos", "Pastas comuns do aparelho")
+
+        acoes = tk.Frame(w, bg=BG)
+        acoes.pack(fill="x", padx=10, pady=4)
+        self._bt(acoes, "Baixar", "Baixar para o PC", "Copia os itens marcados para uma pasta do PC (adb pull)", self.baixar)
+        self._bt(acoes, "Enviar", "Enviar para o aparelho", "Escolhe arquivos do PC e coloca nesta pasta (adb push)", self.enviar)
+        self._bt(acoes, "Abrir no PC", "Abrir no PC", "Baixa para a pasta temporaria e abre com o programa padrao", self.abrir)
+        self._bt(acoes, "Nova pasta", "Nova pasta", "Cria uma pasta aqui", self.nova_pasta)
+        self._bt(acoes, "Renomear", "Renomear", "Muda o nome do item marcado", self.renomear)
+        self._bt(acoes, "Excluir", "Excluir", "Apaga os itens marcados do aparelho (pede confirmacao)", self.exclui)
+        self.lb_esp = tk.Label(acoes, text="", bg=BG, fg=FG2, font=("Segoe UI", 9))
+        self.lb_esp.pack(side="right")
+
+        corpo = tk.Frame(w, bg=BG)
+        corpo.pack(fill="both", expand=True, padx=10, pady=(4, 0))
+        cols = ("nome", "tam", "data", "perm")
+        self.tv = ttk.Treeview(corpo, columns=cols, show="headings", selectmode="extended")
+        for c, tt, lg, an in (("nome", "Nome", 460, "w"), ("tam", "Tamanho", 90, "e"), ("data", "Modificado", 130, "w"), ("perm", "Permissoes", 100, "w")):
+            self.tv.heading(c, text=tt, command=lambda c=c: self.ordena(c))
+            self.tv.column(c, width=lg, anchor=an)
+        sb = ttk.Scrollbar(corpo, orient="vertical", command=self.tv.yview)
+        self.tv.configure(yscrollcommand=sb.set)
+        self.tv.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        self.tv.bind("<Double-Button-1>", self.duplo)
+        self.tv.bind("<Return>", self.duplo)
+        self.tv.bind("<BackSpace>", lambda e: self.sobe())
+        self.tv.bind("<Delete>", lambda e: self.exclui())
+        self.tv.bind("<F5>", lambda e: self.vai(self.caminho, False))
+
+        self.rodape = tk.Label(w, text="", bg=BG, fg=FG2, anchor="w", font=("Segoe UI", 9), padx=10)
+        self.rodape.pack(fill="x", pady=(4, 8))
+
+        threading.Thread(target=self._espaco, daemon=True).start()
+        self.vai(self.caminho, True)
+        w.after(150, self._consome)
+
+    def _bt(self, pai, texto, titulo, detalhe, cmd, largura=None):
+        b = ttk.Button(pai, text=texto, command=cmd, width=largura) if largura else ttk.Button(pai, text=texto, command=cmd)
+        b.pack(side="left", padx=(0, 6))
+        Dica(b, titulo, detalhe)
+        return b
+
+    # ---- adb
+    def _adb(self, *args, timeout=30):
+        return rodar([self.cap.adb, "-s", self.cap.serial] + list(args), timeout=timeout)
+
+    def _espaco(self):
+        try:
+            _, out, _ = self._adb("shell", "df -k /sdcard | tail -1", timeout=15)
+            c = out.split()
+            if len(c) >= 4 and c[1].isdigit():
+                self.q.put(("espaco", "armazenamento: %s livres de %s" % (tamanho_legivel(int(c[3]) * 1024), tamanho_legivel(int(c[1]) * 1024))))
+        except Exception:
+            pass
+
+    # ---- navegacao
+    def vai(self, caminho, grava_hist=True):
+        caminho = posixpath.normpath("/" + caminho.strip().lstrip("/")) if caminho.strip("/") else "/"  # resolve ".." antes de checar a area permitida
+        if grava_hist and caminho != self.caminho:
+            self.hist.append(self.caminho)
+        self.caminho = caminho
+        self.var_cam.set(caminho)
+        self.rodape.configure(text="listando %s ..." % caminho, fg=FG2)
+
+        def trabalho():
+            try:
+                _, out, err = self._adb("shell", "ls -la %s 2>&1" % q(caminho.rstrip("/") + "/"), timeout=30)
+                itens = parse_ls(out)
+                msg = ""
+                if not itens and out.strip():
+                    primeira = out.strip().splitlines()[-1]
+                    if "total" not in primeira and not RX_LS.match(primeira):
+                        msg = primeira
+                self.q.put(("lista", caminho, itens, msg))
+            except Exception as e:  # noqa: BLE001
+                self.q.put(("lista", caminho, [], str(e)[:120]))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def volta(self):
+        if self.hist:
+            self.vai(self.hist.pop(), False)
+
+    def sobe(self):
+        if self.caminho != "/":
+            self.vai(self.caminho.rsplit("/", 1)[0] or "/", True)
+
+    def atalho(self, _e=None):
+        for nome, cam in ATALHOS:
+            if nome == self.cb.get():
+                self.vai(cam, True)
+        self.cb.set("Atalhos...")
+
+    def duplo(self, _e=None):
+        sel = self.tv.selection()
+        if not sel:
+            return
+        nome, tipo = self.itens[sel[0]][0], self.itens[sel[0]][1]
+        if tipo in ("dir", "link"):
+            self.vai(self.caminho.rstrip("/") + "/" + nome, True)
+        else:
+            self.abrir()
+
+    def ordena(self, col):
+        atual, desc = self.ordem
+        self.ordem = (col, (not desc) if atual == col else False)
+        self.mostra()
+
+    def mostra(self):
+        col, desc = self.ordem
+        chave = {"nome": lambda i: i[0].lower(), "tam": lambda i: i[2], "data": lambda i: i[3], "perm": lambda i: i[4]}[col]
+        itens = sorted(self.itens.values(), key=chave, reverse=desc)
+        itens.sort(key=lambda i: 0 if i[1] in ("dir", "link") else 1)  # pastas primeiro
+        self.tv.delete(*self.tv.get_children())
+        self.ordem_ids = {}
+        for n, it in enumerate(itens):
+            nome, tipo, tam, data, perm = it
+            marca = "\U0001F4C1 " if tipo in ("dir", "link") else "\U0001F4C4 "
+            iid = "i%d" % n
+            self.ordem_ids[iid] = it
+            self.tv.insert("", "end", iid=iid, values=(marca + nome, "" if tipo != "file" else tamanho_legivel(tam), data, perm))
+        self.itens = dict(self.ordem_ids)
+
+    # ---- selecao
+    def marcados(self):
+        return [self.itens[i] for i in self.tv.selection() if i in self.itens]
+
+    def _remoto(self, nome):
+        return self.caminho.rstrip("/") + "/" + nome
+
+    # ---- operacoes (em segundo plano, resultado pela fila)
+    def tarefa(self, texto, comandos, depois=None):
+        if self.ocupado:
+            return messagebox.showinfo("Arquivos", "Aguarde: %s" % self.ocupado, parent=self.win)
+        self.ocupado = texto
+        self.rodape.configure(text=texto, fg=ACENTO)
+
+        def trabalho():
+            falhas = []
+            for cmd in comandos:
+                try:
+                    rc, out, err = self._adb(*cmd, timeout=1800)
+                    if rc != 0:
+                        falhas.append((out + " " + err).strip().splitlines()[-1] if (out + err).strip() else "falhou")
+                except Exception as e:  # noqa: BLE001
+                    falhas.append(str(e)[:100])
+            self.q.put(("fim", texto, falhas, depois))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def baixar(self):
+        sel = self.marcados()
+        if not sel:
+            return messagebox.showinfo("Arquivos", "Marque o que deseja baixar.", parent=self.win)
+        destino = filedialog.askdirectory(title="Salvar no PC em...", initialdir=os.path.join(os.path.expanduser("~"), "Downloads"), parent=self.win)
+        if not destino:
+            return
+        cmds = [["pull", self._remoto(i[0]), destino] for i in sel]
+        self.tarefa("baixando %d item(ns) para %s ..." % (len(sel), destino), cmds, lambda: os.startfile(destino) if os.name == "nt" else None)
+
+    def enviar(self):
+        arqs = filedialog.askopenfilenames(title="Escolha os arquivos para enviar", parent=self.win)
+        if not arqs:
+            return
+        cmds = [["push", a, self.caminho.rstrip("/") + "/"] for a in arqs]
+        self.tarefa("enviando %d arquivo(s) para %s ..." % (len(arqs), self.caminho), cmds, lambda: self.vai(self.caminho, False))
+
+    def abrir(self):
+        sel = [i for i in self.marcados() if i[1] == "file"]
+        if not sel:
+            return messagebox.showinfo("Arquivos", "Marque um arquivo para abrir.", parent=self.win)
+        pasta = tempfile.mkdtemp(prefix="espelhatela-")
+        alvo = os.path.join(pasta, sel[0][0])
+        self.tarefa("baixando %s para abrir ..." % sel[0][0], [["pull", self._remoto(sel[0][0]), pasta]], lambda: os.startfile(alvo) if os.name == "nt" and os.path.exists(alvo) else None)
+
+    def _protegido(self, caminho):
+        return not any(caminho == s or caminho.startswith(s + "/") for s in SEGUROS)
+
+    def nova_pasta(self):
+        nome = simpledialog.askstring("Nova pasta", "Nome da pasta em %s:" % self.caminho, parent=self.win)
+        if not nome or "/" in nome:
+            return
+        dest = self._remoto(nome.strip())
+        if self._protegido(dest):
+            return messagebox.showwarning("Arquivos", "Alteracoes so sao permitidas em /sdcard, /storage e /data/local/tmp.", parent=self.win)
+        self.tarefa("criando pasta ...", [["shell", "mkdir -p " + q(dest)]], lambda: self.vai(self.caminho, False))
+
+    def renomear(self):
+        sel = self.marcados()
+        if len(sel) != 1:
+            return messagebox.showinfo("Arquivos", "Marque um unico item para renomear.", parent=self.win)
+        antigo = self._remoto(sel[0][0])
+        novo_nome = simpledialog.askstring("Renomear", "Novo nome:", initialvalue=sel[0][0], parent=self.win)
+        if not novo_nome or "/" in novo_nome or novo_nome == sel[0][0]:
+            return
+        if self._protegido(antigo):
+            return messagebox.showwarning("Arquivos", "Alteracoes so sao permitidas em /sdcard, /storage e /data/local/tmp.", parent=self.win)
+        self.tarefa("renomeando ...", [["shell", "mv %s %s" % (q(antigo), q(self._remoto(novo_nome.strip())))]], lambda: self.vai(self.caminho, False))
+
+    def exclui(self):
+        sel = self.marcados()
+        if not sel:
+            return
+        alvos = [self._remoto(i[0]) for i in sel]
+        if any(self._protegido(a) for a in alvos):
+            return messagebox.showwarning("Arquivos", "Exclusao so e permitida em /sdcard, /storage e /data/local/tmp.", parent=self.win)
+        lista = "\n".join(a for a in alvos[:8]) + ("\n... (+%d)" % (len(alvos) - 8) if len(alvos) > 8 else "")
+        if not messagebox.askyesno("Excluir", "Apagar do aparelho %s:\n\n%s\n\nEsta acao nao pode ser desfeita." % (self.cap.serial, lista), icon="warning", parent=self.win):
+            return
+        self.tarefa("excluindo %d item(ns) ..." % len(alvos), [["shell", "rm -rf " + q(a)] for a in alvos], lambda: self.vai(self.caminho, False))
+
+    # ---- fila -> UI
+    def _consome(self):
+        if self.parar:
+            return
+        try:
+            while not self.q.empty():
+                m = self.q.get_nowait()
+                if m[0] == "lista":
+                    _, cam, itens, msg = m
+                    if cam != self.caminho:
+                        continue
+                    self.itens = {"x%d" % n: it for n, it in enumerate(itens)}
+                    self.mostra()
+                    if msg:
+                        self.rodape.configure(text="%s: %s" % (cam, msg), fg=PERIGO)
+                    else:
+                        pastas = sum(1 for i in itens if i[1] != "file")
+                        self.rodape.configure(text="%s  -  %d pasta(s), %d arquivo(s)" % (cam, pastas, len(itens) - pastas), fg=FG2)
+                elif m[0] == "espaco":
+                    self.lb_esp.configure(text=m[1])
+                elif m[0] == "fim":
+                    _, texto, falhas, depois = m
+                    self.ocupado = ""
+                    if falhas:
+                        self.rodape.configure(text="falhou: %s" % falhas[0][:160], fg=PERIGO)
+                        messagebox.showerror("Arquivos", "Houve falha:\n\n%s" % "\n".join(falhas[:6]), parent=self.win)
+                    else:
+                        self.rodape.configure(text="concluido: %s" % texto.replace(" ...", ""), fg=FG2)
+                        if depois:
+                            depois()
+        except Exception as e:  # noqa: BLE001
+            self.rodape.configure(text="erro: %s" % e, fg=PERIGO)
+        self.win.after(150, self._consome)
+
+    def fechar(self):
+        self.parar = True
+        self.app.arq = None
+        self.win.destroy()
+
+
+# ================================================================= Exportar logcat
+JANELAS_LOG = (2, 5, 10)  # minutos oferecidos no menu
+RX_HORA_LOG = re.compile(r"^(\d\d)-(\d\d)\s+(\d\d):(\d\d):(\d\d)\.(\d+)")
+
+
+def pasta_logcat():
+    base = os.path.join(os.path.expanduser("~"), "Documents")
+    if not os.path.isdir(base):
+        base = os.path.expanduser("~")
+    pasta = os.path.join(base, "EspelhaTela", "Logcat")
+    os.makedirs(pasta, exist_ok=True)
+    return pasta
+
+
+def _data_linha(m, ref):
+    """Data da linha. O logcat nao traz o ano: usa o do relogio do aparelho e recua um ano se cair no futuro."""
+    mes, dia, h, mi, s = (int(m.group(k)) for k in range(1, 6))
+    ms = int(m.group(6).ljust(3, "0")[:3])
+    try:
+        d = datetime.datetime(ref.year, mes, dia, h, mi, s, ms * 1000)
+        if d > ref + datetime.timedelta(days=1):
+            d = d.replace(year=ref.year - 1)
+    except ValueError:
+        return None
+    return d
+
+
+def filtra_janela(texto, minutos, agora=None):
+    """Mantem so as linhas dos ultimos `minutos` minutos.
+    `agora` e o relogio do aparelho; sem ele, vale a linha mais nova do proprio log.
+    Devolve (linhas, primeira_hora, ultima_hora, agora)."""
+    ref = agora or datetime.datetime.now()
+    marcadas = []
+    for ln in texto.splitlines():
+        m = RX_HORA_LOG.match(ln)
+        marcadas.append((_data_linha(m, ref) if m else None, ln))
+    datas = [d for d, _ in marcadas if d]
+    if not datas:
+        return [], None, None, agora
+    if agora is None:
+        agora = max(datas)
+    corte = agora - datetime.timedelta(minutes=minutos)
+    saida, manter = [], False
+    for d, ln in marcadas:
+        if d is not None:
+            manter = d >= corte
+        if manter:  # linha sem hora (continuacao) acompanha a anterior
+            saida.append(ln)
+    return saida, min(datas), max(datas), agora
+
+
+def exportar_logcat(adb, serial, minutos, pasta=None):
+    """Salva o logcat dos ultimos `minutos` minutos. Devolve (caminho, total_de_linhas, aviso).
+    Levanta RuntimeError com mensagem legivel."""
+    agora = None
+    try:  # o logcat usa a hora do aparelho, nao a do PC
+        _, d, _ = rodar([adb, "-s", serial, "shell", "date '+%Y-%m-%d %H:%M:%S'"], timeout=10)
+        agora = datetime.datetime.strptime(d.strip().splitlines()[-1].strip(), "%Y-%m-%d %H:%M:%S")
+    except Exception:  # noqa: BLE001
+        agora = None
+    try:
+        rc, out, err = rodar([adb, "-s", serial, "logcat", "-d", "-v", "threadtime"], timeout=120)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("o aparelho demorou demais para entregar o log")
+    if not any(RX_HORA_LOG.match(l) for l in out.splitlines()):
+        if rc != 0:
+            raise RuntimeError("o adb recusou o logcat: %s" % ((err or out).strip()[:200] or "sem detalhes"))
+        raise RuntimeError(
+            "o logcat do aparelho veio vazio. Alguns firmwares de usuario restringem o log ao shell; "
+            "nesse caso nao ha o que exportar."
+        )
+    linhas, primeira, ultima, agora = filtra_janela(out, minutos, agora)
+    if not linhas:
+        raise RuntimeError(
+            "nenhuma linha nos ultimos %d min (o log do aparelho vai de %s a %s)"
+            % (minutos, primeira.strftime("%d/%m %H:%M:%S"), ultima.strftime("%d/%m %H:%M:%S"))
+        )
+    corte = agora - datetime.timedelta(minutes=minutos)
+    aviso = ""
+    if primeira - corte > datetime.timedelta(seconds=30):
+        aviso = "o buffer do aparelho so guarda desde %s (cerca de %.1f min), menos que os %d pedidos" % (
+            primeira.strftime("%H:%M:%S"), (agora - primeira).total_seconds() / 60.0, minutos)
+    pasta = pasta or pasta_logcat()
+    nome = "logcat-%s-%dmin-%s.txt" % (re.sub(r"[^A-Za-z0-9._-]", "_", serial), minutos, datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+    caminho = os.path.join(pasta, nome)
+    cab = [
+        "# EspelhaTela - logcat dos ultimos %d min" % minutos,
+        "# aparelho: %s" % serial,
+        "# relogio do aparelho: %s" % (agora.strftime("%Y-%m-%d %H:%M:%S")),
+        "# linhas: %d" % len(linhas),
+    ]
+    if aviso:
+        cab.append("# atencao: " + aviso)
+    with open(caminho, "w", encoding="utf-8", newline="\n") as f:
+        f.write("\n".join(cab + [""] + linhas) + "\n")
+    return caminho, len(linhas), aviso
+
+
+RX_IP = re.compile(r"^\d{1,3}(\.\d{1,3}){3}(:\d{1,5})?$")
+
+
+def motivo_sem_aparelho(aparelhos):
+    """Texto do rodape quando ha aparelho na lista, mas nenhum utilizavel (unauthorized, offline...)."""
+    msgs = []
+    for a in aparelhos:
+        if a["estado"] == "unauthorized":
+            msgs.append("%s NAO AUTORIZADO: aceite 'Permitir depuracao' na tela do aparelho (marque 'Sempre permitir')" % a["serial"])
+        elif a["estado"] == "offline":
+            msgs.append("%s esta offline: reconecte o cabo ou use o botao + IP" % a["serial"])
+        elif a["estado"] != "device":
+            msgs.append("%s em estado '%s'" % (a["serial"], a["estado"]))
+    return "; ".join(msgs)
+
+
+# ================================================================= Painel do app e do aparelho
+PERMISSOES = [
+    "android.permission.CAMERA", "android.permission.ACCESS_FINE_LOCATION", "android.permission.ACCESS_COARSE_LOCATION",
+    "android.permission.READ_EXTERNAL_STORAGE", "android.permission.WRITE_EXTERNAL_STORAGE", "android.permission.READ_PHONE_STATE",
+    "android.permission.RECORD_AUDIO", "android.permission.POST_NOTIFICATIONS", "android.permission.BLUETOOTH_CONNECT",
+    "android.permission.BLUETOOTH_SCAN", "android.permission.NEARBY_WIFI_DEVICES",
+]
+# preparo para automacao: (rotulo, namespace, chave, valor desejado)
+PREPARO = [
+    ("Animacao de janelas", "global", "window_animation_scale", "0"),
+    ("Animacao de transicao", "global", "transition_animation_scale", "0"),
+    ("Duracao de animadores", "global", "animator_duration_scale", "0"),
+    ("Tela sempre ligada (carregando)", "global", "stay_on_while_plugged_in", "7"),
+    ("Tempo para apagar a tela", "system", "screen_off_timeout", "1800000"),
+    ("Rotacao automatica", "system", "accelerometer_rotation", "0"),
+    ("Orientacao fixa em retrato", "system", "user_rotation", "0"),
+]
+
+
+def valor_igual(a, b):
+    try:
+        return abs(float(a) - float(b)) < 1e-6
+    except (TypeError, ValueError):
+        return str(a).strip() == str(b).strip()
+
+
+class PainelApp:
+    """Informacoes do aparelho e de um app escolhido, acoes rapidas e preparo para automacao."""
+
+    def __init__(self, app):
+        self.app = app
+        self.cap = app.cap
+        self.q = queue.Queue()
+        self.parar = False
+        favs = favoritos(app.config)
+        self.pacote = app.config.get("pacote_painel") or (favs[0] if favs else "")
+        self.valores = {}      # campo -> label
+        self.estado = {}       # chave de PREPARO -> valor atual
+        self.instalados = []
+
+        w = self.win = tk.Toplevel(app.root)
+        w.title("App e aparelho - %s" % (self.cap.serial or "aparelho"))
+        aplica_icone(w)
+        w.configure(bg=BG)
+        w.geometry("860x720")
+        w.minsize(760, 600)
+        w.protocol("WM_DELETE_WINDOW", self.fechar)
+
+        topo = tk.Frame(w, bg=BG)
+        topo.pack(fill="x", padx=14, pady=(12, 4))
+        tk.Label(topo, text="Pacote do app:", bg=BG, fg=FG).pack(side="left")
+        self.cb = ttk.Combobox(topo, state="readonly", width=34, values=favoritos(app.config))
+        self.cb.set(self.pacote)
+        self.cb.pack(side="left", padx=8)
+        self.cb.bind("<<ComboboxSelected>>", self.escolheu)
+        Dica(self.cb, "Pacote do app", "Apps instalados pelo usuario; os favoritos aparecem primeiro (marcados com *)")
+        self.bt_fav = ttk.Button(topo, text="\u2606 Favorito", command=self.alterna_favorito, width=11)
+        self.bt_fav.pack(side="left", padx=(0, 8))
+        Dica(self.bt_fav, "Favorito", "Fixa este app no topo da lista (aqui, no monitor de memoria e no Desinstalar)")
+        self._marca_favorito()
+        ttk.Button(topo, text="Atualizar", command=self.atualiza).pack(side="left")
+
+        cols = tk.Frame(w, bg=BG)
+        cols.pack(fill="x", padx=14, pady=6)
+        esq = self._cartao(cols, "Aplicativo")
+        dir_ = self._cartao(cols, "Aparelho")
+        for nome in ("Instalado", "Versao", "Codigo da versao", "Primeira instalacao", "Ultima atualizacao", "Instalado por", "Em execucao (PID)"):
+            self._campo(esq, nome)
+        for nome in ("Modelo", "Android", "Tela", "Bateria", "IP Wi-Fi", "ANDROID_ID (sistema)", "Serial de hardware", "Hora do aparelho"):
+            self._campo(dir_, nome)
+        esq.master.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        dir_.master.pack(side="left", fill="both", expand=True, padx=(6, 0))
+        linha = tk.Frame(dir_.master, bg=BG)
+        linha.pack(fill="x", pady=(0, 6), padx=10)
+        b = ttk.Button(linha, text="Copiar ANDROID_ID", command=lambda: self.copia("ANDROID_ID (sistema)"))
+        b.pack(side="left")
+        Dica(b, "Copiar ANDROID_ID", "Valor lido pelo shell. No Android 8+ cada app recebe um ANDROID_ID proprio, entao o ID que o app exibe pode ser outro: confira na tela do app")
+        ttk.Button(linha, text="Copiar serial", command=lambda: self.copia("Serial de hardware")).pack(side="left", padx=6)
+
+        acoes = tk.LabelFrame(w, text=" Acoes no app ", bg=BG, fg=FG2, bd=1, relief="solid")
+        acoes.pack(fill="x", padx=14, pady=6)
+        for txt, tit, det, cmd in (
+            ("Abrir", "Abrir o app", "Inicia o app (monkey)", self.abrir),
+            ("Forcar parada", "Forcar parada", "am force-stop", self.parar_app),
+            ("Reiniciar", "Reiniciar o app", "Para e abre de novo", self.reiniciar),
+            ("Limpar dados", "Limpar dados", "pm clear: apaga login, configuracoes e arquivos do app (pede confirmacao)", self.limpar),
+            ("Conceder permissoes", "Conceder permissoes", "Concede camera, localizacao, armazenamento etc. quando o app pede", self.conceder),
+        ):
+            b = ttk.Button(acoes, text=txt, command=cmd)
+            b.pack(side="left", padx=6, pady=8)
+            Dica(b, tit, det)
+
+        prep = tk.LabelFrame(w, text=" Preparar o aparelho para a automacao ", bg=BG, fg=FG2, bd=1, relief="solid")
+        prep.pack(fill="both", expand=True, padx=14, pady=6)
+        self.lista = tk.Frame(prep, bg=BG)
+        self.lista.pack(fill="x", padx=10, pady=(8, 4))
+        self.marcas = {}
+        for rot, ns, chave, alvo in PREPARO:
+            fr = tk.Frame(self.lista, bg=BG)
+            fr.pack(fill="x")
+            tk.Label(fr, text=rot, bg=BG, fg=FG, width=34, anchor="w").pack(side="left")
+            lb = tk.Label(fr, text="...", bg=BG, fg=FG2, anchor="w")
+            lb.pack(side="left")
+            self.marcas[chave] = lb
+        bt = tk.Frame(prep, bg=BG)
+        bt.pack(fill="x", padx=10, pady=8)
+        b1 = ttk.Button(bt, text="Preparar para automacao", command=self.prepara)
+        b1.pack(side="left")
+        Dica(b1, "Preparar para automacao", "Desliga animacoes, mantem a tela ligada e trava a rotacao. Guarda os valores antigos para restaurar")
+        b2 = ttk.Button(bt, text="Restaurar valores anteriores", command=self.restaura)
+        b2.pack(side="left", padx=8)
+        Dica(b2, "Restaurar", "Volta ao que o aparelho tinha antes do preparo")
+        self.rodape = tk.Label(w, text="", bg=BG, fg=FG2, anchor="w", font=("Segoe UI", 9), padx=14)
+        self.rodape.pack(fill="x", pady=(2, 10))
+
+        self.atualiza()
+        w.after(150, self._consome)
+
+    # ---- widgets
+    def _cartao(self, pai, titulo):
+        caixa = tk.Frame(pai, bg=BG)
+        quadro = tk.LabelFrame(caixa, text=" %s " % titulo, bg=BG, fg=FG2, bd=1, relief="solid")
+        quadro.pack(fill="x", pady=(0, 6))
+        return quadro
+
+    def _campo(self, quadro, nome):
+        fr = tk.Frame(quadro, bg=BG)
+        fr.pack(fill="x", padx=10, pady=1)
+        tk.Label(fr, text=nome, bg=BG, fg=FG2, width=22, anchor="w", font=("Segoe UI", 9)).pack(side="left")
+        lb = tk.Label(fr, text="-", bg=BG, fg=FG, anchor="w", font=("Segoe UI", 9, "bold"))
+        lb.pack(side="left")
+        self.valores[nome] = lb
+
+    # ---- coleta
+    def _adb(self, *args, timeout=30):
+        return rodar([self.cap.adb, "-s", self.cap.serial] + list(args), timeout=timeout)
+
+    def escolheu(self, _e=None):
+        pk = self.cb.get().lstrip("* ").strip()
+        if not re.fullmatch(r"[A-Za-z0-9._]+", pk):
+            return
+        self.pacote = pk
+        self.cb.set(pk)
+        self.app.config["pacote_painel"] = pk
+        salvar_config(self.app.config)
+        self._marca_favorito()
+        self.atualiza()
+
+    def _marca_favorito(self):
+        fav = self.pacote in favoritos(self.app.config)
+        self.bt_fav.configure(text=("\u2605 Favorito" if fav else "\u2606 Favorito"))
+
+    def alterna_favorito(self):
+        if not self.pacote:
+            return
+        favs = favoritos(self.app.config)
+        if self.pacote in favs:
+            favs.remove(self.pacote)
+        else:
+            favs.insert(0, self.pacote)
+        self.app.config["favoritos"] = favs
+        salvar_config(self.app.config)
+        self._marca_favorito()
+        self._lista_pacotes()
+
+    def _lista_pacotes(self):
+        favs = favoritos(self.app.config)
+        resto = sorted(x for x in self.instalados if x not in favs and re.fullmatch(r"[A-Za-z0-9._]+", x))
+        self.cb.configure(values=["* " + x for x in favs] + resto)
+
+    def atualiza(self):
+        self.rodape.configure(text="lendo o aparelho ...", fg=ACENTO)
+        pk = self.pacote or "android"
+        chaves = " ".join("%s:%s" % (ns, ch) for _, ns, ch, _ in PREPARO)
+
+        def trabalho():
+            try:
+                script = (
+                    "echo '##model'; getprop ro.product.manufacturer; getprop ro.product.model; "
+                    "echo '##android'; getprop ro.build.version.release; getprop ro.build.version.sdk; "
+                    "echo '##serial'; getprop ro.serialno; getprop ro.boot.serialno; "
+                    "echo '##androidid'; settings get secure android_id; "
+                    "echo '##wm'; wm size; wm density; "
+                    "echo '##battery'; dumpsys battery | grep -E 'level|temperature|status'; "
+                    "echo '##ip'; ip -f inet addr show wlan0 2>/dev/null | grep inet; "
+                    "echo '##date'; date '+%%Y-%%m-%%d %%H:%%M:%%S'; getprop persist.sys.timezone; "
+                    "echo '##pkgs'; pm list packages -3; "
+                    "echo '##pkg'; dumpsys package %s | grep -E 'versionName|versionCode|firstInstallTime|lastUpdateTime|installerPackageName'; echo '##pid'; pidof %s; "
+                    "echo '##cfg'; for k in %s; do ns=${k%%%%:*}; ch=${k#*:}; echo $ch=$(settings get $ns $ch); done"
+                ) % (pk, pk, chaves)
+                _, out, err = self._adb("shell", script, timeout=40)
+                self.q.put(("info", pk, out))
+            except Exception as e:  # noqa: BLE001
+                self.q.put(("erro", str(e)[:160]))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _aplica_info(self, pk, out):
+        secoes, atual = {}, None
+        for l in out.splitlines():
+            l = l.rstrip()
+            if l.startswith("##"):
+                atual = l[2:]
+                secoes[atual] = []
+            elif atual:
+                secoes[atual].append(l)
+        s = lambda k: [x for x in secoes.get(k, []) if x.strip()]
+        v = self.valores
+        m = s("model")
+        v["Modelo"].configure(text=" ".join(m) or "-")
+        a = s("android")
+        v["Android"].configure(text=("%s (API %s)" % (a[0], a[1])) if len(a) > 1 else "-")
+        v["Serial de hardware"].configure(text=(s("serial") or ["-"])[0])
+        aid = (s("androidid") or ["-"])[0].strip().upper()
+        v["ANDROID_ID (sistema)"].configure(text=aid)
+        wm = " ".join(x.replace("Physical size:", "").replace("Override size:", "-> ").replace("Physical density:", "@").strip() for x in s("wm"))
+        v["Tela"].configure(text=wm or "-")
+        bat = {x.split(":")[0].strip(): x.split(":", 1)[1].strip() for x in s("battery") if ":" in x}
+        temp = bat.get("temperature")
+        v["Bateria"].configure(text=("%s%%%s" % (bat.get("level", "?"), (", %.1f C" % (int(temp) / 10.0)) if temp and temp.lstrip("-").isdigit() else "")) if bat else "-")
+        ip = re.search(r"inet\s+([\d.]+)", " ".join(s("ip")))
+        v["IP Wi-Fi"].configure(text=ip.group(1) if ip else "sem Wi-Fi")
+        d = s("date")
+        v["Hora do aparelho"].configure(text="%s  %s" % (d[0] if d else "-", d[1] if len(d) > 1 else ""))
+        pacs = [x.split(":", 1)[1] for x in s("pkgs") if x.startswith("package:")]
+        self.instalados = pacs
+        self._lista_pacotes()
+        if not self.pacote and pacs:  # primeira vez: comeca pelo primeiro app instalado
+            self.pacote = sorted(pacs)[0]
+            self.cb.set(self.pacote)
+            self._marca_favorito()
+            return self.atualiza()
+        info = {}
+        for x in s("pkg"):
+            if "=" in x:
+                ch, val = x.strip().split("=", 1)
+                info[ch.strip()] = val.strip()
+        instalado = pk in pacs or "versionName" in info
+        v["Instalado"].configure(text=("sim" if instalado else "nao"), fg=FG if instalado else PERIGO)
+        v["Versao"].configure(text=info.get("versionName", "-"))
+        cod = info.get("versionCode", "-")
+        v["Codigo da versao"].configure(text=cod.split()[0] if cod != "-" else "-")
+        v["Primeira instalacao"].configure(text=info.get("firstInstallTime", "-"))
+        v["Ultima atualizacao"].configure(text=info.get("lastUpdateTime", "-"))
+        v["Instalado por"].configure(text=info.get("installerPackageName", "-"))
+        pid = (s("pid") or [""])[0].strip()
+        v["Em execucao (PID)"].configure(text=pid or "parado")
+        cfg = {}
+        for x in s("cfg"):
+            if "=" in x:
+                ch, val = x.split("=", 1)
+                cfg[ch.strip()] = val.strip()
+        self.estado = cfg
+        for rot, ns, chave, alvo in PREPARO:
+            atualv = cfg.get(chave, "null")
+            ok = valor_igual(atualv, alvo) or (chave == "screen_off_timeout" and atualv.isdigit() and int(atualv) >= int(alvo))
+            self.marcas[chave].configure(text="%s   (atual: %s, ideal: %s)" % ("OK" if ok else "ajustar", atualv, alvo), fg="#5fb764" if ok else "#ffb454")
+        self.rodape.configure(text="atualizado %s" % time.strftime("%H:%M:%S"), fg=FG2)
+
+    def _consome(self):
+        if self.parar:
+            return
+        try:
+            while not self.q.empty():
+                m = self.q.get_nowait()
+                if m[0] == "info":
+                    self._aplica_info(m[1], m[2])
+                elif m[0] == "erro":
+                    self.rodape.configure(text=m[1], fg=PERIGO)
+                elif m[0] == "msg":
+                    self.rodape.configure(text=m[1], fg=FG2)
+                    if len(m) > 2 and m[2]:
+                        self.atualiza()
+        except Exception as e:  # noqa: BLE001
+            self.rodape.configure(text="erro: %s" % e, fg=PERIGO)
+        self.win.after(150, self._consome)
+
+    # ---- acoes
+    def _roda(self, texto, comandos, depois_atualiza=True):
+        self.rodape.configure(text=texto + " ...", fg=ACENTO)
+
+        def trabalho():
+            falhas = []
+            for cmd in comandos:
+                try:
+                    rc, out, err = self._adb("shell", cmd, timeout=60)
+                    txt = (out + " " + err)
+                    if rc != 0 or "Exception" in txt or "No activities found" in txt or ("Error" in txt and "Success" not in txt):
+                        falhas.append(txt.strip().splitlines()[-1][:100] if txt.strip() else "falhou")
+                except Exception as e:  # noqa: BLE001
+                    falhas.append(str(e)[:100])
+            self.q.put(("msg", ("%s: %s" % (texto, falhas[0])) if falhas else ("concluido: " + texto), depois_atualiza))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def abrir(self):
+        if not self.pacote:
+            return messagebox.showinfo("App e aparelho", "Escolha um app na lista.", parent=self.win)
+        self._roda("abrindo %s" % self.pacote, ["monkey -p %s -c android.intent.category.LAUNCHER 1" % self.pacote])
+
+    def parar_app(self):
+        if not self.pacote:
+            return messagebox.showinfo("App e aparelho", "Escolha um app na lista.", parent=self.win)
+        self._roda("forcando parada de %s" % self.pacote, ["am force-stop %s" % self.pacote])
+
+    def reiniciar(self):
+        if not self.pacote:
+            return messagebox.showinfo("App e aparelho", "Escolha um app na lista.", parent=self.win)
+        self._roda("reiniciando %s" % self.pacote, ["am force-stop %s" % self.pacote, "sleep 1", "monkey -p %s -c android.intent.category.LAUNCHER 1" % self.pacote])
+
+    def limpar(self):
+        if not self.pacote:
+            return messagebox.showinfo("App e aparelho", "Escolha um app na lista.", parent=self.win)
+        if not messagebox.askyesno("Limpar dados", "Apagar TODOS os dados de %s no aparelho %s?\n\nLogin, configuracoes e arquivos do app serao perdidos." % (self.pacote, self.cap.serial), icon="warning", parent=self.win):
+            return
+        self._roda("limpando dados de %s" % self.pacote, ["pm clear %s" % self.pacote])
+
+    def conceder(self):
+        if not self.pacote:
+            return messagebox.showinfo("App e aparelho", "Escolha um app na lista.", parent=self.win)
+        self._roda("concedendo permissoes a %s" % self.pacote, ["pm grant %s %s 2>/dev/null; true" % (self.pacote, p) for p in PERMISSOES])
+
+    def copia(self, campo):
+        txt = self.valores[campo].cget("text")
+        if txt and txt != "-":
+            self.win.clipboard_clear()
+            self.win.clipboard_append(txt)
+            self.rodape.configure(text="copiado: %s" % txt, fg=FG2)
+
+    def _arq_original(self):
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        return os.path.join(base, "EspelhaTela", "preparo-%s.json" % (self.cap.serial or "aparelho"))
+
+    def prepara(self):
+        mudancas = [(rot, ns, ch, self.estado.get(ch, "null"), alvo) for rot, ns, ch, alvo in PREPARO if not valor_igual(self.estado.get(ch, "null"), alvo)]
+        if not mudancas:
+            return messagebox.showinfo("Preparar", "O aparelho ja esta preparado.", parent=self.win)
+        lista = "\n".join("- %s: %s -> %s" % (rot, atual, alvo) for rot, _ns, _ch, atual, alvo in mudancas)
+        if not messagebox.askyesno("Preparar para automacao", "Alterar no aparelho %s:\n\n%s\n\nOs valores atuais ficam guardados para restaurar." % (self.cap.serial, lista), parent=self.win):
+            return
+        try:
+            arq = self._arq_original()
+            antigos = {}
+            if os.path.exists(arq):
+                with open(arq, encoding="utf-8") as f:
+                    antigos = json.load(f)  # nao sobrescreve o original se ja preparou antes
+            for _rot, ns, ch, atual, _alvo in mudancas:
+                antigos.setdefault("%s:%s" % (ns, ch), atual)
+            os.makedirs(os.path.dirname(arq), exist_ok=True)
+            with open(arq, "w", encoding="utf-8") as f:
+                json.dump(antigos, f)
+        except Exception as e:  # noqa: BLE001
+            return messagebox.showerror("Preparar", "Nao consegui guardar os valores originais: %s" % e, parent=self.win)
+        self._roda("preparando o aparelho", ["settings put %s %s %s" % (ns, ch, alvo) for _rot, ns, ch, _atual, alvo in mudancas])
+
+    def restaura(self):
+        arq = self._arq_original()
+        if not os.path.exists(arq):
+            return messagebox.showinfo("Restaurar", "Nao ha valores anteriores guardados para este aparelho.", parent=self.win)
+        with open(arq, encoding="utf-8") as f:
+            antigos = json.load(f)
+        if not messagebox.askyesno("Restaurar", "Voltar %d configuracao(oes) aos valores anteriores?" % len(antigos), parent=self.win):
+            return
+        cmds = []
+        for chave, val in antigos.items():
+            ns, ch = chave.split(":", 1)
+            cmds.append("settings delete %s %s" % (ns, ch) if val in ("null", "") else "settings put %s %s %s" % (ns, ch, val))
+        self._roda("restaurando configuracoes", cmds)
+        try:
+            os.remove(arq)
+        except OSError:
+            pass
+
+    def fechar(self):
+        self.parar = True
+        self.app.painel = None
+        self.win.destroy()
+
+
+# ----------------------------------------------------------------- preferencias
+def _arq_config():
+    base = os.environ.get("APPDATA") or os.path.expanduser("~")
+    return os.path.join(base, "EspelhaTela", "config.json")
+
+
+def carregar_config():
+    try:
+        with open(_arq_config(), encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def salvar_config(cfg):
+    try:
+        os.makedirs(os.path.dirname(_arq_config()), exist_ok=True)
+        with open(_arq_config(), "w", encoding="utf-8") as f:
+            json.dump(cfg, f)
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------------------- UI
+BG = "#1c1c1e"      # fundo da janela
+BG2 = "#2a2a2d"     # botoes
+HOVER = "#3a3a3f"
+FG = "#e6e6e6"
+FG2 = "#8e8e93"
+ACENTO = "#7c4dff"  # toggles ligados
+PERIGO = "#e5484d"
+def favoritos(cfg):
+    """Pacotes que o usuario marcou como favoritos no painel do app (guardados no config.json)."""
+    return [p for p in (cfg.get("favoritos") or []) if isinstance(p, str) and re.fullmatch(r"[A-Za-z0-9._]+", p)]
+CHAVES = {  # teclas de navegacao que o Android entende
+    "BackSpace": "67", "Return": "66", "Tab": "61", "Escape": "111",
+    "Up": "19", "Down": "20", "Left": "21", "Right": "22", "Delete": "112",
+}
+
+
+class App:
+    def __init__(self, root, cap, versao, aviso):
+        self.root, self.cap, self.versao = root, cap, versao
+        self.config = carregar_config()
+        self.visto = -1
+        self.pausado = False
+        self.cheia = False
+        self.foto = None
+        self.exibido = (0, 0)  # tamanho da imagem na tela, para mapear o clique
+        self.janela = []
+        self.msg = ("", 0.0)
+        self.dica_txt = ""
+        self.dica_ate = 0.0
+        self.arq = None  # janela do gerenciador de arquivos
+        self.painel = None  # janela do painel do app
+        self.toque = None
+        self.fila = queue.Queue()
+        self.inj = Injetor(cap.adb)
+        self.via_inj = False
+        self.ult_mov = 0.0
+        self.fps_hist = []
+        self.resultados = queue.Queue()  # respostas das tarefas longas (instalar/desinstalar)
+        self.mem = None  # janela do monitor de memoria
+        self.ocupado = ""
+        self.adb_porta = adb_servidor.porta_do_ambiente()
+        self.sel_on = False  # seletor de identificador ligado
+        self.sel_nos = None  # arvore da ultima leitura da tela
+        self.sel_lendo = False
+        self.sel_hover = None
+        self.sel_fixo = None
+        threading.Thread(target=self._envia_comandos, daemon=True).start()
+
+        root.title("EspelhaTela")
+        aplica_icone(root)
+        sw, sh = root.winfo_screenwidth(), root.winfo_screenheight()
+        h = int(sh * 0.84)
+        root.geometry("%dx%d+%d+%d" % (int(h * 0.56) + 96, h, int(sw * 0.08), int(sh * 0.04)))
+        root.minsize(380, 480)
+        root.configure(bg=BG)
+        estilo = ttk.Style()
+        try:
+            estilo.theme_use("clam")
+        except tk.TclError:
+            pass
+        estilo.configure("TCombobox", fieldbackground=BG2, background=BG2, foreground=FG, arrowcolor=FG, bordercolor=BG2, lightcolor=BG2, darkcolor=BG2)
+        estilo.map("TCombobox", fieldbackground=[("readonly", BG2)], foreground=[("readonly", FG)], selectbackground=[("readonly", BG2)], selectforeground=[("readonly", FG)], background=[("readonly", BG2)])
+        root.option_add("*TCombobox*Listbox.background", BG2)
+        root.option_add("*TCombobox*Listbox.foreground", FG)
+        root.option_add("*TCombobox*Listbox.selectBackground", ACENTO)
+
+        # ---- barra lateral (estilo Vysor)
+        lado = self.lado = tk.Frame(root, bg=BG, width=78)
+        lado.pack(side="left", fill="y", padx=(8, 0), pady=8)
+        lado.pack_propagate(False)
+        self.bt_pausa = self.botao(lado, "⏸", "Pausar / retomar|Congela a captura da tela (atalho: Espaco)", self.alterna_pausa)
+        self.botao(lado, "\U0001F4F7", "Salvar captura|Grava um PNG em Imagens\\EspelhaTela (Ctrl+S)", self.salva)
+        self.botao(lado, "⛶", "Tela cheia|Alterna tela cheia (F11)", self.tela_cheia)
+        tk.Frame(lado, bg=BG, height=10).pack()
+        self.botao(lado, "◁", "Voltar|Tecla Voltar do Android", lambda: self.tecla("4"))
+        self.botao(lado, "○", "Inicio|Tecla Home do Android", lambda: self.tecla("3"))
+        self.botao(lado, "□", "Apps recentes|Tecla de apps recentes", lambda: self.tecla("187"))
+        self.botao(lado, "\U0001F50A", "Volume +|Aumenta o volume do aparelho", lambda: self.tecla("24"))
+        self.botao(lado, "\U0001F509", "Volume -|Diminui o volume do aparelho", lambda: self.tecla("25"))
+        self.botao(lado, "⏻", "Ligar / desligar a tela|Tecla de energia do aparelho", lambda: self.tecla("26"))
+        tk.Frame(lado, bg=BG, height=10).pack()
+        self.bt_sel = self.botao(lado, "\U0001F3AF\nSeletor", "Seletor de identificador|Clique num elemento da tela para copiar o seletor do Maestro (id/testID, texto). Nao use com flow rodando (F6)", self.alterna_seletor, pequeno=True)
+        self.bt_instala = self.botao(lado, "\u2B07\nInstalar APK", "Instalar APK|Escolhe a(s) APK(s) e instala (adb install -r)", self.instalar_apk, pequeno=True)
+        self.bt_desinstala = self.botao(lado, "\U0001F5D1\nDesinstalar APK", "Desinstalar APK|Escolhe os apps a remover (os favoritos tem atalho)", self.desinstalar_apk, pequeno=True)
+        self.bt_log = self.botao(lado, "\U0001F4DC\nExportar\nLogcat", "Exportar logcat|Salva em arquivo o log dos ultimos 2, 5 ou 10 minutos do aparelho", self.menu_logcat, pequeno=True)
+        self.bt_painel = self.botao(lado, "\U0001F4F1\nApp e aparelho", "App e aparelho|Versao instalada de qualquer app, abrir/parar/limpar, permissoes e preparo para automacao", self.abre_painel, pequeno=True)
+        self.bt_arq = self.botao(lado, "\U0001F4C1\nArquivos", "Gerenciador de arquivos|Navega pelas pastas do aparelho: baixar, enviar, abrir, excluir", self.abre_arquivos, pequeno=True)
+        self.bt_mem = self.botao(lado, "\U0001F4CA\nMemoria", "Monitor de memoria|Gerenciador de tarefas: memoria usada por cada app do aparelho", self.abre_memoria, pequeno=True)
+
+        # ---- coluna principal
+        centro = self.centro = tk.Frame(root, bg=BG)
+        centro.pack(side="left", fill="both", expand=True)
+        topo = tk.Frame(centro, bg=BG)
+        topo.pack(fill="x", padx=8, pady=(8, 4))
+        self.bt_lado = tk.Button(topo, text="☰", command=self.alterna_lateral, bg=BG2, fg=FG, activebackground=HOVER, activeforeground=FG, bd=0, relief="flat", font=("Segoe UI Symbol", 11), cursor="hand2", takefocus=0, width=3)
+        self.bt_lado.pack(side="left", padx=(0, 8))
+        Dica(self.bt_lado, "Barra lateral", "Mostrar / ocultar as opcoes (F9)")
+        self.combo = ttk.Combobox(topo, state="readonly", width=28)
+        self.combo.pack(side="left")
+        self.combo.bind("<<ComboboxSelected>>", self.escolheu)
+        self.bt_ip = tk.Button(topo, text="+ IP", command=self.conectar_ip, bg=BG2, fg=FG, activebackground=HOVER, activeforeground=FG, bd=0, relief="flat", font=("Segoe UI", 9), cursor="hand2", takefocus=0, width=5)
+        self.bt_ip.pack(side="left", padx=(6, 0), ipady=2)
+        Dica(self.bt_ip, "Conectar por IP", "Conecta um aparelho pela rede (adb connect). O endereco fica salvo e e reconectado sozinho")
+        self.cb_cap = ttk.Combobox(topo, state="readonly", width=19, values=list(MODOS_CAPTURA))
+        self.cb_cap.pack(side="left", padx=(8, 0))
+        self.cb_cap.set(next((k for k, v in MODOS_CAPTURA.items() if v == (cap.modo, cap.perfil)), "Quadros (leve)"))
+        self.cb_cap.bind("<<ComboboxSelected>>", self.mudou_captura)
+        Dica(self.cb_cap, "Modo de captura", "Video: fluido (screenrecord). Quadros: mais leve para o aparelho")
+
+        if aviso:
+            av = tk.Label(centro, text=aviso, bg="#fdf3d6", fg="#5c4300", wraplength=440, justify="left", anchor="w", padx=8, pady=4, cursor="hand2", font=("Segoe UI", 8))
+            av.pack(fill="x", padx=8, pady=(0, 4))
+            av.bind("<Button-1>", lambda e: av.destroy())
+
+        self.area = tk.Frame(centro, bg="#000000")
+        self.area.pack(fill="both", expand=True, padx=8)
+        self.area.pack_propagate(False)
+        self.espera = tk.Label(self.area, bg="#000000", text="aguardando o aparelho...", fg=FG2, font=("Segoe UI", 11))
+        self.espera.place(relx=0.5, rely=0.5, anchor="center")
+        self.tela = tk.Canvas(self.area, bg="#000000", bd=0, highlightthickness=0, width=10, height=10, cursor="hand2")
+        self.img_id = self.tela.create_image(0, 0, anchor="nw")
+        self.tela.bind("<ButtonPress-1>", self.pressionou)
+        self.tela.bind("<B1-Motion>", self.moveu)
+        self.tela.bind("<ButtonRelease-1>", self.soltou)
+        self.tela.bind("<MouseWheel>", self.rolou)
+        self.tela.bind("<Motion>", self.passou)
+        self.sel_painel = tk.Frame(centro, bg=BG2)
+
+        self.rodape = tk.Label(centro, anchor="w", bg=BG, fg=FG2, font=("Segoe UI", 9), padx=10, pady=6)
+        self.rodape.pack(fill="x")
+
+        root.bind("<Key>", self.tecla_digitada)
+        root.bind("<Control-s>", lambda e: self.salva())
+        root.bind("<F11>", lambda e: self.tela_cheia())
+        root.bind("<F9>", lambda e: self.alterna_lateral())
+        root.bind("<F6>", lambda e: self.alterna_seletor())
+        root.bind("<Configure>", self.mudou_tamanho)
+        root.bind("<Unmap>", lambda e: setattr(self.cap, "ativo", False) if e.widget is root else None)
+        root.bind("<Map>", lambda e: setattr(self.cap, "ativo", not self.pausado) if e.widget is root else None)
+        root.protocol("WM_DELETE_WINDOW", self.fechar)
+        if not self.config.get("lateral", True):
+            self.lado.pack_forget()
+        self.tick()
+        self.rodape_tick()
+
+    # ---- widgets
+    def botao(self, pai, glifo, dica, cmd, pequeno=False):
+        fonte = ("Segoe UI Symbol", 8) if pequeno else ("Segoe UI Symbol", 13)
+        b = tk.Button(pai, text=glifo, command=cmd, bg=BG2, fg=FG, activebackground=HOVER, activeforeground=FG, disabledforeground="#55555a", bd=0, relief="flat", font=fonte, height=2 if pequeno else 1, cursor="hand2", takefocus=0)
+        b.pack(fill="x", pady=3, ipady=4)
+        titulo, _, detalhe = dica.partition("|")
+        Dica(b, titulo, detalhe)
+        b.bind("<Enter>", lambda e: (setattr(self, "dica_txt", detalhe or titulo), setattr(self, "dica_ate", time.time() + 2.5), b.configure(bg=HOVER) if str(b["state"]) != "disabled" else None), add="+")
+        b.bind("<Leave>", lambda e: (setattr(self, "dica_txt", ""), b.configure(bg=self._cor_base(b))), add="+")
+        return b
+
+    def _cor_base(self, b):
+        if b is getattr(self, "bt_sel", None) and self.sel_on:
+            return ACENTO
+        return BG2
+
+    # ---- acoes de janela
+    def alterna_pausa(self):
+        self.pausado = not self.pausado
+        self.cap.ativo = not self.pausado
+        self.bt_pausa.configure(text="▶" if self.pausado else "⏸")
+
+    # ---- instalar / desinstalar APK (acoes de escrita: sempre com serial explicito)
+    def _serial_ou_aviso(self):
+        if not self.cap.serial:
+            messagebox.showwarning("EspelhaTela", "Nenhum aparelho selecionado.")
+            return None
+        if self.ocupado:
+            messagebox.showinfo("EspelhaTela", "Aguarde: %s" % self.ocupado)
+            return None
+        return self.cap.serial
+
+    def tarefa(self, texto, args, ao_terminar, timeout=600):
+        """Roda `adb -s <serial> <args>` em segundo plano e devolve o resultado pela fila."""
+        serial = self.cap.serial
+        self.ocupado = texto
+        for b in (self.bt_instala, self.bt_desinstala):
+            b.configure(state="disabled")
+
+        def trabalho():
+            try:
+                if args and isinstance(args[0], list):  # varios comandos em sequencia
+                    linhas, falhou = [], False
+                    for cmd in args:
+                        rc, out, err = rodar([self.cap.adb, "-s", serial] + cmd, timeout=timeout)
+                        resp = (out + " " + err).strip().splitlines()
+                        ok = rc == 0 and "Success" in (out + err)
+                        falhou = falhou or not ok
+                        linhas.append("%s: %s" % (cmd[-1], "removido" if ok else (resp[-1] if resp else "falhou")))
+                    self.resultados.put((ao_terminar, 1 if falhou else 0, "\n".join(linhas)))
+                else:
+                    rc, out, err = rodar([self.cap.adb, "-s", serial] + args, timeout=timeout)
+                    self.resultados.put((ao_terminar, rc, (out + "\n" + err).strip()))
+            except Exception as e:  # noqa: BLE001
+                self.resultados.put((ao_terminar, -1, str(e)))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _fim_tarefa(self):
+        self.ocupado = ""
+        for b in (self.bt_instala, self.bt_desinstala):
+            b.configure(state="normal")
+
+    def instalar_apk(self):
+        serial = self._serial_ou_aviso()
+        if not serial:
+            return
+        arqs = filedialog.askopenfilenames(title="Escolha a APK (ou as APKs de um app dividido)", filetypes=[("APK", "*.apk"), ("Todos os arquivos", "*.*")])
+        if not arqs:
+            return
+        arqs = list(arqs)
+        base = ["install-multiple"] if len(arqs) > 1 else ["install"]
+        nome = os.path.basename(arqs[0]) + (" (+%d)" % (len(arqs) - 1) if len(arqs) > 1 else "")
+        self.tarefa("instalando %s em %s..." % (nome, serial), base + ["-r"] + arqs, lambda rc, saida: self._apos_instalar(rc, saida, base, arqs, nome))
+
+    def _apos_instalar(self, rc, saida, base, arqs, nome):
+        self._fim_tarefa()
+        if rc == 0 and "Success" in saida:
+            self.aviso_rapido("instalado: " + nome)
+            return messagebox.showinfo("Instalar APK", "Instalado com sucesso:\n%s" % nome)
+        if "VERSION_DOWNGRADE" in saida:
+            if messagebox.askyesno("Instalar APK", "O aparelho ja tem uma versao MAIS NOVA desse app.\nInstalar mesmo assim (downgrade)?"):
+                return self.tarefa("instalando (downgrade) %s..." % nome, base + ["-r", "-d"] + arqs, lambda r, s: self._apos_instalar(r, s, base, arqs, nome))
+            return
+        dica = ""
+        if "UPDATE_INCOMPATIBLE" in saida or "SIGNATURES" in saida:
+            dica = "\n\nA assinatura difere da instalada: desinstale o app antes (botao Desinstalar APK)."
+        elif "INSUFFICIENT_STORAGE" in saida:
+            dica = "\n\nSem espaco no aparelho."
+        messagebox.showerror("Instalar APK", "Falha ao instalar %s:\n\n%s%s" % (nome, saida[-600:] or "sem detalhes", dica))
+
+    def desinstalar_apk(self):
+        serial = self._serial_ou_aviso()
+        if not serial:
+            return
+        self.root.configure(cursor="watch")
+        self.root.update_idletasks()
+        try:
+            _, out, _ = rodar([self.cap.adb, "-s", serial, "shell", "pm", "list", "packages", "-3"], timeout=20)
+        except Exception as e:  # noqa: BLE001
+            self.root.configure(cursor="")
+            return messagebox.showerror("Desinstalar APK", "Nao consegui listar os apps: %s" % e)
+        self.root.configure(cursor="")
+        pacotes = sorted(l.split(":", 1)[1].strip() for l in out.splitlines() if l.startswith("package:"))
+        if not pacotes:
+            return messagebox.showinfo("Desinstalar APK", "Nenhum app de terceiros encontrado no aparelho.")
+        self._dialogo_desinstalar(serial, pacotes)
+
+    def _dialogo_desinstalar(self, serial, pacotes):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Desinstalar APK - %s" % serial)
+        aplica_icone(dlg)
+        dlg.configure(bg=BG)
+        dlg.transient(self.root)
+        dlg.geometry("440x480")
+        tk.Label(dlg, text="Escolha os apps a desinstalar (Ctrl/Shift para varios):", bg=BG, fg=FG, anchor="w").pack(fill="x", padx=12, pady=(12, 4))
+        filtro = tk.StringVar()
+        ent = tk.Entry(dlg, textvariable=filtro, bg=BG2, fg=FG, insertbackground=FG, relief="flat")
+        ent.pack(fill="x", padx=12, ipady=4)
+        lista = tk.Listbox(dlg, bg=BG2, fg=FG, selectbackground=ACENTO, selectforeground="#fff", relief="flat", activestyle="none", exportselection=False, selectmode="extended")
+        lista.pack(fill="both", expand=True, padx=12, pady=8)
+        manter = tk.BooleanVar(value=False)
+        tk.Checkbutton(dlg, text="Manter dados e cache do app (adb uninstall -k)", variable=manter, bg=BG, fg=FG, selectcolor=BG2, activebackground=BG, activeforeground=FG).pack(anchor="w", padx=12)
+
+        def preenche(*_):
+            f = filtro.get().strip().lower()
+            lista.delete(0, "end")
+            itens = [p for p in pacotes if f in p.lower()]
+            for p in itens:
+                lista.insert("end", p)
+
+        def marca_favoritos():
+            lista.selection_clear(0, "end")
+            favs = favoritos(self.config)
+            for i in range(lista.size()):
+                if lista.get(i) in favs:
+                    lista.selection_set(i)
+                    lista.see(i)
+
+        def confirma():
+            escolhidos = [lista.get(i) for i in lista.curselection()]
+            if not escolhidos:
+                return
+            aviso = "Desinstalar do aparelho %s:\n\n%s" % (serial, "\n".join(escolhidos))
+            aviso += "\n\nOs dados dos apps serao mantidos." if manter.get() else "\n\nOs DADOS dos apps serao apagados."
+            if not messagebox.askyesno("Desinstalar APK", aviso, parent=dlg):
+                return
+            dlg.destroy()
+            cmds = [["uninstall"] + (["-k"] if manter.get() else []) + [pk] for pk in escolhidos]
+            nome = escolhidos[0] if len(escolhidos) == 1 else "%d apps" % len(escolhidos)
+            self.tarefa("desinstalando %s..." % nome, cmds, lambda rc, saida: self._apos_desinstalar(rc, saida, escolhidos))
+
+        filtro.trace_add("write", preenche)
+        preenche()
+        rod = tk.Frame(dlg, bg=BG)
+        rod.pack(fill="x", padx=12, pady=(0, 12))
+        ttk.Button(rod, text="Marcar favoritos", command=marca_favoritos).pack(side="left")
+        ttk.Button(rod, text="Cancelar", command=dlg.destroy).pack(side="right")
+        ttk.Button(rod, text="Desinstalar", command=confirma).pack(side="right", padx=(0, 8))
+        lista.bind("<Double-Button-1>", lambda e: confirma())
+        ent.focus_set()
+        dlg.grab_set()
+
+    def _apos_desinstalar(self, rc, saida, pacotes):
+        self._fim_tarefa()
+        if rc == 0:
+            self.aviso_rapido("desinstalado: " + ", ".join(pacotes))
+            return messagebox.showinfo("Desinstalar APK", "Desinstalado:\n%s" % "\n".join(pacotes))
+        messagebox.showerror("Desinstalar APK", "Resultado por pacote:\n\n%s" % (saida[-800:] or "sem detalhes"))
+
+    def menu_logcat(self):
+        m = tk.Menu(self.root, tearoff=0, bg=BG2, fg=FG, activebackground=ACENTO, activeforeground="#ffffff", bd=0)
+        for n in JANELAS_LOG:
+            m.add_command(label="Exportar os ultimos %d minutos" % n, command=lambda n=n: self.exporta_logcat(n))
+        try:
+            m.tk_popup(self.bt_log.winfo_rootx() + self.bt_log.winfo_width(), self.bt_log.winfo_rooty())
+        finally:
+            m.grab_release()
+
+    def exporta_logcat(self, minutos):
+        serial = self._serial_ou_aviso()
+        if not serial:
+            return
+        self.ocupado = "exportando o logcat dos ultimos %d min de %s..." % (minutos, serial)
+        self.bt_log.configure(state="disabled")
+
+        def trabalho():
+            try:
+                caminho, n, aviso = exportar_logcat(self.cap.adb, serial, minutos)
+                self.resultados.put((lambda rc, s: self._apos_logcat(rc, s, minutos), 0, "\n".join([caminho, str(n), aviso])))
+            except Exception as e:  # noqa: BLE001
+                self.resultados.put((lambda rc, s: self._apos_logcat(rc, s, minutos), 1, str(e)))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _apos_logcat(self, rc, saida, minutos):
+        self.ocupado = ""
+        self.bt_log.configure(state="normal")
+        if rc != 0:
+            return messagebox.showerror("Exportar logcat", saida)
+        partes = saida.split("\n")
+        caminho, n, aviso = partes[0], partes[1], (partes[2] if len(partes) > 2 else "")
+        self.aviso_rapido("logcat salvo: %s (%s linhas)" % (caminho, n), 8)
+        texto = "Logcat dos ultimos %d minutos salvo (%s linhas):\n\n%s" % (minutos, n, caminho)
+        if aviso:
+            texto += "\n\nAtencao: " + aviso
+        if messagebox.askyesno("Exportar logcat", texto + "\n\nAbrir a pasta?"):
+            try:
+                subprocess.Popen(["explorer", "/select," + caminho])
+            except Exception:  # noqa: BLE001
+                pass
+
+    def conectar_ip(self):
+        ultimo = (self.config.get("ips") or [""])[0]
+        txt = simpledialog.askstring("Conectar por IP", "Endereco do aparelho (IP ou IP:porta; a porta padrao e 5555):", initialvalue=ultimo, parent=self.root)
+        if not txt:
+            return
+        txt = txt.strip()
+        if not RX_IP.match(txt):
+            return messagebox.showerror("Conectar por IP", "Endereco invalido: %s\nUse algo como 192.168.1.20 ou 192.168.1.20:5555" % txt)
+        if ":" not in txt:
+            txt += ":5555"
+        self.ocupado = "conectando em %s..." % txt
+
+        def trabalho():
+            try:
+                rc, out, err = rodar([self.cap.adb, "connect", txt], timeout=20)
+                self.resultados.put((lambda r, s: self._apos_ip(txt, s), rc, (out + "\n" + err).strip()))
+            except Exception as e:  # noqa: BLE001
+                self.resultados.put((lambda r, s: self._apos_ip(txt, s), -1, str(e)))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _apos_ip(self, ip, saida):
+        self.ocupado = ""
+        baixo = saida.lower()
+        nao_autorizado = "failed to authenticate" in baixo
+        conectou = ("connected to" in baixo) and "cannot" not in baixo and "failed" not in baixo
+        if conectou or nao_autorizado:
+            ips = [x for x in (self.config.get("ips") or []) if x != ip]
+            self.config["ips"] = ([ip] + ips)[:5]
+            salvar_config(self.config)
+            self.cap.ips = list(self.config["ips"])
+        if nao_autorizado:
+            return messagebox.showinfo("Conectar por IP", "O aparelho %s pediu autorizacao.\n\nAceite 'Permitir depuracao' na tela dele (marque 'Sempre permitir'). Ele entra na lista assim que voce aceitar." % ip)
+        if conectou:
+            return self.aviso_rapido("conectado em %s" % ip)
+        messagebox.showerror("Conectar por IP", "Nao consegui conectar em %s:\n\n%s\n\nConfira se o aparelho esta na mesma rede e com a depuracao por rede (porta 5555) ligada." % (ip, saida[-300:] or "sem resposta"))
+
+    def abre_painel(self):
+        if not self.cap.serial:
+            return messagebox.showwarning("EspelhaTela", "Nenhum aparelho selecionado.")
+        if self.painel is not None:
+            self.painel.win.deiconify()
+            self.painel.win.lift()
+            return
+        self.painel = PainelApp(self)
+
+    def abre_arquivos(self):
+        if not self.cap.serial:
+            return messagebox.showwarning("EspelhaTela", "Nenhum aparelho selecionado.")
+        if self.arq is not None:
+            self.arq.win.deiconify()
+            self.arq.win.lift()
+            return
+        self.arq = GerenciadorArquivos(self)
+
+    def abre_memoria(self):
+        if not self.cap.serial:
+            return messagebox.showwarning("EspelhaTela", "Nenhum aparelho selecionado.")
+        if self.mem is not None:
+            self.mem.win.deiconify()
+            self.mem.win.lift()
+            return
+        self.mem = MonitorMemoria(self)
+
+    def alterna_lateral(self):
+        """Mostra/oculta a barra lateral e lembra a escolha para a proxima vez."""
+        if self.lado.winfo_ismapped():
+            self.lado.pack_forget()
+            self.config["lateral"] = False
+        else:
+            self.lado.pack(side="left", fill="y", padx=(8, 0), pady=8, before=self.centro)
+            self.config["lateral"] = True
+        self.visto = -1
+        salvar_config(self.config)
+
+    def tela_cheia(self):
+        self.cheia = not self.cheia
+        self.root.attributes("-fullscreen", self.cheia)
+
+    def escolheu(self, _e=None):
+        self.sel_nos = self.sel_hover = self.sel_fixo = None
+        self.cap.trocar(self.combo.get().split(" ")[0])
+        self.visto = -1
+        self.foto = None
+        self.tela.itemconfig(self.img_id, image="")  # nao deixa a imagem do aparelho anterior na tela
+
+    def salva(self):
+        pasta = os.path.join(os.path.expanduser("~"), "Pictures", "EspelhaTela")
+        os.makedirs(pasta, exist_ok=True)
+        caminho = os.path.join(pasta, "captura-%s-%s.png" % (self.cap.serial or "aparelho", datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
+        serial = self.cap.serial
+        if self.cap.via == "video" and serial:
+            # o video chega reduzido: a captura salva e feita em resolucao total
+            reserva = self.cap.frame
+            self.aviso_rapido("capturando em resolucao total ...", 4)
+
+            def trabalho():
+                try:
+                    rc, out, err = rodar([self.cap.adb, "-s", serial, "exec-out", "screencap -p"], timeout=20, binario=True)
+                    if rc != 0 or out[:4] != b"\x89PNG":
+                        raise RuntimeError(err.strip() or "captura vazia")
+                    with open(caminho, "wb") as f:
+                        f.write(out)
+                    self.aviso_rapido("salvo em " + caminho)
+                except Exception as e:  # noqa: BLE001
+                    if reserva is not None:
+                        reserva.save(caminho, "PNG")
+                        self.aviso_rapido("salvo (resolucao reduzida: %s) em %s" % (str(e)[:50], caminho))
+                    else:
+                        self.aviso_rapido("falha ao salvar: %s" % str(e)[:80])
+
+            threading.Thread(target=trabalho, daemon=True).start()
+            return
+        img = self.cap.frame
+        if img is None:
+            return self.aviso_rapido("nada para salvar ainda")
+        img.save(caminho, "PNG")
+        self.aviso_rapido("salvo em " + caminho)
+
+    def mostra_aviso(self, texto):
+        av = tk.Label(self.centro, text=texto, bg="#fdf3d6", fg="#5c4300", wraplength=440, justify="left", anchor="w", padx=8, pady=4, cursor="hand2", font=("Segoe UI", 8))
+        av.pack(fill="x", padx=8, pady=(0, 4), before=self.area)
+        av.bind("<Button-1>", lambda e: av.destroy())
+
+    def aviso_rapido(self, texto, segundos=6):
+        self.msg = (texto, time.time() + segundos)
+
+    def fechar(self):
+        self.cap.parar = True
+        for filha in (self.painel, self.arq, self.mem):
+            try:
+                if filha is not None:
+                    filha.fechar()
+            except Exception:
+                pass
+        self.inj.parar()
+        if self.cap.serial and self.cap.via == "video":
+            parar_gravacao_remota(self.cap.adb, self.cap.serial)
+        self.root.destroy()
+
+    def mudou_tamanho(self, e):
+        if e.widget is self.area or e.widget is self.root:
+            self.visto = -1
+
+    def _envia_comandos(self):
+        while True:
+            args = self.fila.get()
+            try:
+                serial = self.cap.serial
+                if serial:
+                    rodar([self.cap.adb, "-s", serial, "shell", "input"] + args, timeout=10)
+            except Exception as e:  # noqa: BLE001
+                self.aviso_rapido("falha ao enviar: %s" % str(e)[:80])
+
+    def enviar(self, *args):
+        """Caminho universal e lento: `adb shell input ...` (so quando o injetor nao esta pronto)."""
+        self.fila.put([str(x) for x in args])  # o adb so aceita texto
+
+    def inj_envia(self, linha):
+        return self.inj.envia(linha, self.cap.serial)
+
+    def tecla(self, codigo):
+        if not self.inj_envia("k %s" % codigo):
+            self.enviar("keyevent", codigo)
+
+    def _dims_dispositivo(self):
+        """Tamanho real do aparelho (o video chega reduzido), na mesma orientacao da imagem."""
+        img = self.cap.frame
+        if img is None:
+            return None
+        fw, fh = img.size
+        dw, dh = self.cap.dev_size or (fw, fh)
+        if (fw > fh) != (dw > dh):
+            dw, dh = dh, dw
+        return dw, dh
+
+    def _ponto(self, e):
+        """Posicao do mouse sobre a imagem -> pixel do aparelho."""
+        d = self._dims_dispositivo()
+        nw, nh = self.exibido
+        if d is None or not nw or not nh:
+            return None
+        x = min(max(e.x, 0), nw - 1) * d[0] / nw
+        y = min(max(e.y, 0), nh - 1) * d[1] / nh
+        return int(x), int(y)
+
+    def ripple(self, x, y):
+        """Efeito visual imediato no ponto do clique: o usuario ve que o clique foi recebido."""
+        r = self.tela.create_oval(x - 6, y - 6, x + 6, y + 6, outline="#ffffff", width=3)
+
+        def passo(i=0):
+            if i >= 7:
+                self.tela.delete(r)
+                return
+            d = 6 + i * 4
+            self.tela.coords(r, x - d, y - d, x + d, y + d)
+            self.root.after(28, lambda: passo(i + 1))
+
+        passo()
+
+    def pressionou(self, e):
+        self.tela.focus_set()
+        if self.sel_on:  # seletor ligado: o clique escolhe o elemento e nao vai para o aparelho
+            return self.sel_clique(e)
+        ponto = self._ponto(e)
+        self.toque = (ponto, time.time(), e.x, e.y)
+        self.ripple(e.x, e.y)
+        self.via_inj = bool(ponto) and self.inj_envia("d %d %d" % ponto)
+
+    def moveu(self, e):
+        if not (self.toque and self.via_inj):
+            return
+        agora = time.time()
+        if agora - self.ult_mov < 0.012:  # ~80 movimentos por segundo no maximo
+            return
+        self.ult_mov = agora
+        ponto = self._ponto(e)
+        if ponto:
+            self.inj_envia("m %d %d" % ponto)
+
+    def soltou(self, e):
+        toque, self.toque = self.toque, None
+        if not toque or not toque[0]:
+            return
+        ini, t0, x0, y0 = toque
+        fim = self._ponto(e)
+        if not fim:
+            return
+        if self.via_inj:
+            self.inj_envia("u %d %d" % fim)
+            self.via_inj = False
+            return
+        dt = int((time.time() - t0) * 1000)  # plano B: gesto completo de uma vez
+        if abs(e.x - x0) > 8 or abs(e.y - y0) > 8:
+            self.enviar("swipe", ini[0], ini[1], fim[0], fim[1], max(120, min(dt, 1500)))
+        elif dt >= 500:
+            self.enviar("swipe", ini[0], ini[1], ini[0], ini[1], dt)  # toque longo
+        else:
+            self.enviar("tap", ini[0], ini[1])
+
+    def rolou(self, e):
+        if self.sel_on:
+            self.sel_nos, self.sel_hover = None, None  # a tela vai mudar: a arvore lida fica velha
+            self._sel_desenha()
+        d = self._dims_dispositivo()
+        if d is None:
+            return
+        w, h = d
+        passo = int(h * 0.25) * (1 if e.delta > 0 else -1)
+        cx, cy = w // 2, h // 2
+        if not self.inj_envia("s %d %d %d %d 220" % (cx, cy - passo // 2, cx, cy + passo // 2)):
+            self.enviar("swipe", cx, cy - passo // 2, cx, cy + passo // 2, 250)
+
+    def tecla_digitada(self, e):
+        if isinstance(e.widget, (tk.Entry, tk.Text, ttk.Entry, ttk.Combobox)):
+            return  # digitando num campo do proprio programa (filtro do logcat etc.): nao vai para o aparelho
+        if self.sel_on and e.keysym == "Escape":
+            return self.alterna_seletor()
+        if e.keysym in CHAVES:
+            return self.tecla(CHAVES[e.keysym])
+        c = e.char
+        if c and c.isprintable() and not (e.state & 0x4):  # sem Ctrl
+            if self.inj_envia("t " + quote(c, safe="")):
+                return
+            if c == " ":
+                self.enviar("text", "%s")
+            elif re.fullmatch(r"[A-Za-z0-9.,_@:/+=-]", c):
+                self.enviar("text", c)
+
+    def mudou_captura(self, _e=None):
+        nome = self.cb_cap.get()
+        modo, perfil = MODOS_CAPTURA[nome]
+        if modo == "video" and av is None:
+            self.cb_cap.set("Quadros (leve)")
+            return self.aviso_rapido("modo video indisponivel nesta versao (decodificador ausente)", 5)
+        self.cap.modo, self.cap.perfil = modo, perfil
+        self.cap.video_ok = av is not None
+        self.cap.nota = ""
+        self.cap.erro = ""
+        self.config["captura"] = nome
+        salvar_config(self.config)
+        self.visto = -1
+
+    # ---- seletor de identificador (Maestro)
+    def alterna_seletor(self):
+        self.sel_on = not self.sel_on
+        self.bt_sel.configure(bg=self._cor_base(self.bt_sel))
+        self.sel_hover = self.sel_fixo = None
+        if self.sel_on:
+            self.tela.configure(cursor="crosshair")
+            self._sel_painel([])
+            self.sel_painel.pack(fill="x", padx=8, pady=(4, 0), before=self.rodape)
+            self.sel_ler()
+        else:
+            self.tela.configure(cursor="hand2")
+            self.sel_painel.pack_forget()
+            self.sel_nos = None
+        self._sel_desenha()
+
+    def sel_ler(self, ponto=None):
+        """Le a arvore da tela em segundo plano; com `ponto`, escolhe o elemento ali ao terminar."""
+        serial = self.cap.serial
+        if not serial:
+            return self.aviso_rapido("nenhum aparelho selecionado")
+        if self.sel_lendo:
+            self.sel_pendente = ponto
+            return
+        self.sel_lendo, self.sel_pendente = True, None
+        self.aviso_rapido("lendo os elementos da tela do aparelho...", 30)
+        adb = self.cap.adb
+
+        def trabalho():
+            nos, erro = seletor.ler_tela(rodar, adb, serial)
+            self.resultados.put((lambda rc, s: self._sel_lido(serial, nos, erro, ponto), 0, ""))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _sel_lido(self, serial, nos, erro, ponto):
+        self.sel_lendo = False
+        if not self.sel_on or serial != self.cap.serial:
+            return
+        if nos is None:
+            self.aviso_rapido("nao deu para ler a tela: %s" % erro, 10)
+            return
+        self.sel_nos = nos
+        self.aviso_rapido("%d elementos lidos. Passe o mouse e clique no que quer" % len(nos), 4)
+        pendente = getattr(self, "sel_pendente", None)
+        ponto = pendente or ponto
+        if pendente:
+            return self.sel_ler(pendente)
+        if ponto:
+            i = seletor.no_no_ponto(nos, *ponto)
+            self.sel_fixo = i
+            d = self._dims_dispositivo()
+            self._sel_painel(seletor.seletores(nos, i, d) if i is not None else [], nos[i] if i is not None else None)
+        self._sel_desenha()
+
+    def passou(self, e):
+        if not (self.sel_on and self.sel_nos):
+            return
+        p = self._ponto(e)
+        i = seletor.no_no_ponto(self.sel_nos, *p) if p else None
+        if i != self.sel_hover:
+            self.sel_hover = i
+            self._sel_desenha()
+            if i is not None:
+                self.aviso_rapido(seletor.resumo(self.sel_nos[i]), 3)
+
+    def sel_clique(self, e):
+        p = self._ponto(e)
+        if not p:
+            return
+        self.ripple(e.x, e.y)
+        if self.sel_nos:  # mostra ja com a leitura anterior e confere com uma leitura nova
+            i = seletor.no_no_ponto(self.sel_nos, *p)
+            if i is not None:
+                self.sel_fixo = i
+                self._sel_painel(seletor.seletores(self.sel_nos, i, self._dims_dispositivo()), self.sel_nos[i], lendo=True)
+                self._sel_desenha()
+        self.sel_ler(p)
+
+    def _sel_desenha(self):
+        self.tela.delete("sel")
+        d = self._dims_dispositivo()
+        nw, nh = self.exibido
+        if not (self.sel_on and self.sel_nos and d and nw and nh):
+            return
+        kx, ky = nw / d[0], nh / d[1]
+        for i, cor, larg in ((self.sel_hover, "#ffd60a", 2), (self.sel_fixo, ACENTO, 3)):
+            if i is None or i >= len(self.sel_nos):
+                continue
+            b = self.sel_nos[i]["bounds"]
+            self.tela.create_rectangle(b[0] * kx, b[1] * ky, b[2] * kx - 1, b[3] * ky - 1, outline=cor, width=larg, tags="sel")
+
+    def _sel_painel(self, sugestoes, no=None, lendo=False):
+        for filho in self.sel_painel.winfo_children():
+            filho.destroy()
+        cab = tk.Frame(self.sel_painel, bg=BG2)
+        cab.pack(fill="x", padx=8, pady=(6, 2))
+        titulo = seletor.resumo(no) if no else "Clique num elemento da tela (o clique nao vai para o aparelho). Esc sai."
+        tk.Label(cab, text=titulo, bg=BG2, fg=FG, font=("Segoe UI", 9, "bold" if no else "normal"), anchor="w", justify="left", wraplength=360).pack(side="left", fill="x", expand=True)
+        tk.Button(cab, text="✕", command=self.alterna_seletor, bg=BG2, fg=FG2, activebackground=HOVER, bd=0, relief="flat", cursor="hand2", takefocus=0).pack(side="right")
+        tk.Button(cab, text="Ler de novo", command=self.sel_ler, bg=BG, fg=FG, activebackground=HOVER, bd=0, relief="flat", cursor="hand2", takefocus=0, font=("Segoe UI", 8)).pack(side="right", padx=4, ipadx=4)
+        if lendo:
+            tk.Label(self.sel_painel, text="conferindo com uma leitura nova da tela...", bg=BG2, fg=FG2, font=("Segoe UI", 8), anchor="w").pack(fill="x", padx=8)
+        for rotulo, texto in sugestoes[:6]:
+            linha = tk.Frame(self.sel_painel, bg=BG2)
+            linha.pack(fill="x", padx=8, pady=2)
+            tk.Button(linha, text="Copiar", command=lambda t=texto: self.copiar(t), bg=ACENTO, fg="#ffffff", activebackground=HOVER, bd=0, relief="flat", cursor="hand2", takefocus=0, font=("Segoe UI", 8)).pack(side="right", ipadx=6)
+            tk.Label(linha, text=rotulo, bg=BG2, fg=FG2, font=("Segoe UI", 8), anchor="w").pack(fill="x")
+            tk.Label(linha, text=texto, bg=BG, fg=FG, font=("Consolas", 9), anchor="w", justify="left", padx=6, pady=2).pack(fill="x", padx=(0, 6))
+        tk.Frame(self.sel_painel, bg=BG2, height=4).pack()
+
+    def copiar(self, texto):
+        self.root.clipboard_clear()
+        self.root.clipboard_append(texto)
+        self.aviso_rapido("copiado: " + texto.replace("\n", " ")[:70], 4)
+
+    # ---- servidor adb (wrapper em outra porta)
+    def mostra_aviso_acao(self, texto, rotulo, acao):
+        caixa = tk.Frame(self.centro, bg="#fdf3d6")
+        caixa.pack(fill="x", padx=8, pady=(0, 4), before=self.area)
+
+        def faz():
+            caixa.destroy()
+            acao()
+
+        tk.Button(caixa, text="✕", command=caixa.destroy, bg="#fdf3d6", fg="#5c4300", bd=0, relief="flat", cursor="hand2", takefocus=0).pack(side="right", padx=(0, 4))
+        tk.Button(caixa, text=rotulo, command=faz, bg="#5c4300", fg="#ffffff", activebackground="#7a5a00", bd=0, relief="flat", cursor="hand2", takefocus=0, font=("Segoe UI", 8, "bold")).pack(side="right", padx=4, pady=4, ipadx=6)
+        tk.Label(caixa, text=texto, bg="#fdf3d6", fg="#5c4300", wraplength=330, justify="left", anchor="w", padx=8, pady=4, font=("Segoe UI", 8)).pack(side="left", fill="x", expand=True)
+
+    def troca_adb(self, exe, porta):
+        """Passa a usar o adb.exe real na porta indicada (vale para todos os comandos deste programa)."""
+        os.environ["ADB_SERVER_PORT"] = str(porta)
+        self.inj.parar()
+        self.inj.adb, self.inj.erro = exe, ""
+        self.cap.adb = exe
+        self.cap.aparelhos = listar_aparelhos(exe)
+        self.cap.trocar("")
+        self.adb_porta = porta
+        self.config["adb_exe"], self.config["adb_porta"] = exe, porta
+        salvar_config(self.config)
+        self.aviso_rapido("usando %s na porta %d (lembrado para as proximas vezes)" % (exe, porta), 8)
+
+    # ---- laco de desenho (so a thread da UI mexe no Tk)
+    def tick(self):
+        try:
+            while not self.resultados.empty():
+                cb, rc, saida = self.resultados.get_nowait()
+                cb(rc, saida)
+            cap = self.cap
+            if cap.frame is not None and cap.seq != self.visto:
+                self.visto = cap.seq
+                self.desenha(cap.frame)
+        except Exception as e:  # noqa: BLE001
+            self.aviso_rapido("erro ao desenhar: %s" % e)
+        self.root.after(33 if self.cap.via == "video" else 70, self.tick)
+
+    def desenha(self, img):
+        aw, ah = self.area.winfo_width(), self.area.winfo_height()
+        if aw < 10 or ah < 10:
+            return
+        w, h = img.size
+        k = min(aw / w, ah / h)
+        nw, nh = max(1, int(w * k)), max(1, int(h * k))
+        mostrada = img.resize((nw, nh), Image.BILINEAR) if (nw, nh) != (w, h) else img
+        self.exibido = (nw, nh)
+        self.foto = ImageTk.PhotoImage(mostrada)
+        if self.espera is not None:
+            self.espera.place_forget()
+            self.espera = None
+        self.tela.configure(width=nw, height=nh)
+        self.tela.place(relx=0.5, rely=0.5, anchor="center")
+        self.tela.itemconfig(self.img_id, image=self.foto)
+        if self.sel_on:
+            self._sel_desenha()
+
+    def rodape_tick(self):
+        cap = self.cap
+        lista = ["%s (%s)" % (a["serial"], a["estado"]) for a in cap.aparelhos]
+        if list(self.combo["values"]) != lista:
+            self.combo["values"] = lista
+        atual = next((x for x in lista if x.startswith(cap.serial + " ")), "") if cap.serial else ""
+        if atual and self.combo.get() != atual:
+            self.combo.set(atual)
+        if cap.serial:
+            self.inj.garantir(cap.serial)
+        cor = FG2
+        if self.ocupado:
+            txt, cor = self.ocupado, ACENTO
+        elif self.msg[1] > time.time():
+            txt = self.msg[0]
+        elif self.dica_txt and time.time() < self.dica_ate:
+            txt = self.dica_txt
+        elif cap.erro:
+            txt, cor = cap.erro, PERIGO
+        else:
+            agora = time.time()
+            self.fps_hist = [(a, b) for a, b in self.fps_hist + [(agora, cap.seq)] if a > agora - 3.0]
+            fps = (self.fps_hist[-1][1] - self.fps_hist[0][1]) / max(0.001, self.fps_hist[-1][0] - self.fps_hist[0][0]) if len(self.fps_hist) > 1 else 0.0
+            clique = "clique instantaneo" if self.inj.ok(cap.serial) else ("clique via adb (lento: %s)" % (self.inj.erro or "iniciando injetor"))
+            dim = "%dx%d" % cap.frame.size if cap.frame is not None else "-"
+            idade = time.time() - cap.t_frame if cap.t_frame else None
+            if self.pausado:
+                estado = "PAUSADO"
+            elif idade is None:
+                estado = "aguardando"
+            elif idade < 4:
+                estado = "ao vivo"
+            else:
+                estado = "sem quadro novo ha %ds" % idade
+            via = "VIDEO" if cap.via == "video" else "quadros (%d ms)" % cap.ms
+            if cap.nota and cap.via != "video":
+                via += " [%s]" % cap.nota
+            txt = "%s  |  %s  |  %s  |  %s  |  %.0f qd/s  |  %s  |  adb %s :%d" % (cap.serial or "sem aparelho", estado, dim, via, fps, clique, self.versao, self.adb_porta)
+        self.rodape.configure(text=txt, fg=cor)
+        self.root.title("EspelhaTela - %s%s" % (cap.serial or "sem aparelho", " (pausado)" if self.pausado else ""))
+        self.root.after(400, self.rodape_tick)
+
+
+def aplica_adb_lembrado(informado, cfg):
+    """Se o usuario ja escolheu trocar de porta pelo aviso, usa o adb.exe e a porta lembrados
+    (salvo se --adb foi passado ou o ambiente ja define ADB_SERVER_PORT)."""
+    exe, porta = cfg.get("adb_exe"), cfg.get("adb_porta")
+    if informado or not exe or not porta or not os.path.isfile(exe) or os.environ.get("ADB_SERVER_PORT"):
+        return None
+    os.environ["ADB_SERVER_PORT"] = str(porta)
+    return exe
+
+
+def vigia_porta_adb(app, info):
+    """Enquanto nao ha aparelho pronto, confere se ele esta em outro servidor adb (outra porta)
+    e oferece a troca uma vez. So consulta servidores ja no ar (nao sobe nenhum)."""
+    time.sleep(3)
+    while not app.cap.parar:
+        if not any(x["estado"] == "device" for x in app.cap.aparelhos) and app.adb_porta == info["porta"]:
+            sug = adb_servidor.sugestao(info, adb_servidor.servidores([info["porta"]]))
+            if sug:
+                porta = sug["porta"]
+                app.resultados.put((lambda rc, s: app.mostra_aviso_acao(sug["texto"], "Usar a porta %d" % porta, lambda: app.troca_adb(info["exe"], porta)), 0, ""))
+                return
+        time.sleep(15)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Visualizador e controle desktop de tela Android.")
+    ap.add_argument("--serial", default="", help="serial adb; vazio = o unico aparelho conectado")
+    ap.add_argument("--adb", default="", help="caminho do adb (padrao: o do Android SDK)")
+    ap.add_argument("--intervalo-min", type=float, default=0.15, help="pausa minima entre capturas (s)")
+    ap.add_argument("--abrir-memoria", action="store_true", help="abre direto o monitor de memoria")
+    ap.add_argument("--abrir-arquivos", action="store_true", help="abre direto o gerenciador de arquivos")
+    ap.add_argument("--diagnostico", action="store_true", help="grava um relatorio de ambiente em %%TEMP%%\\espelhatela-diagnostico.txt e sai")
+    ap.add_argument("--abrir-app", action="store_true", help="abre direto o painel do app e do aparelho")
+    a = ap.parse_args()
+    cfg = carregar_config()
+    adb_inf = aplica_adb_lembrado(a.adb, cfg)
+    if a.diagnostico:
+        adb_d = adb_inf or achar_adb(a.adb or None)
+        info = adb_servidor.analisa_adb(adb_d) if adb_d else None
+        achados = adb_servidor.servidores([info["porta"]]) if info else {}
+        sug = adb_servidor.sugestao(info, achados) if info else None
+        linhas = [
+            "EspelhaTela %s - diagnostico" % VERSAO,
+            "python/exe: %s (frozen=%s)" % (sys.version.split()[0], getattr(sys, "frozen", False)),
+            "Pillow: %s" % (Image is not None),
+            "PyAV (modo video): %s" % (av.__version__ if av is not None else "ausente"),
+            "injetor (espelha-input.jar): %s" % os.path.isfile(caminho_recurso("espelha-input.jar")),
+            "icone: %s" % os.path.isfile(caminho_recurso("icone.ico")),
+            "adb: %s (versao %s)" % (adb_d, versao_adb(adb_d) if adb_d else "-"),
+            "porta do servidor adb: %s%s" % (info["porta"] if info else "-", " (wrapper de %s)" % info["exe"] if info and info["wrapper"] else ""),
+            "aparelhos: %s" % (listar_aparelhos(adb_d) if adb_d else []),
+            "servidores adb no ar: %s" % achados,
+            "aviso de porta: %s" % (sug["texto"] if sug else "nenhum"),
+            "outros adb em execucao: %s" % adb_em_execucao(),
+        ]
+        destino = os.path.join(tempfile.gettempdir(), "espelhatela-diagnostico.txt")
+        with open(destino, "w", encoding="utf-8") as f:
+            f.write("\n".join(linhas) + "\n")
+        return 0
+
+    if os.name == "nt":  # nitidez em telas com escala de DPI
+        try:
+            import ctypes
+
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
+
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("EspelhaTela.App")
+        except Exception:
+            pass
+    root = tk.Tk()
+    root.withdraw()
+    if Image is None:
+        messagebox.showerror("EspelhaTela", "Pillow nao esta instalado.\nInstale com: pip install pillow")
+        return 2
+    adb = adb_inf or achar_adb(a.adb or None)
+    if not adb:
+        messagebox.showerror("EspelhaTela", "adb nao encontrado.\nInstale o Android SDK platform-tools ou use --adb <caminho>.")
+        return 2
+    versao = versao_adb(adb)
+    aviso = ""
+    info = adb_servidor.analisa_adb(adb)
+    modo, perfil = MODOS_CAPTURA.get(cfg.get("captura", "Video - Rapido"), ("video", "rapido"))
+    if modo == "video" and av is None:
+        modo = "quadros"
+    cap = Captura(adb, a.serial, a.intervalo_min, modo, perfil)
+    cap.ips = list(cfg.get("ips") or [])
+    cap.start()
+    root.deiconify()
+    app = App(root, cap, versao, aviso)
+    app.adb_porta = info["porta"]
+    threading.Thread(target=vigia_porta_adb, args=(app, info), daemon=True).start()
+
+    def checa_adb_duplo():
+        real = info["exe"]  # um wrapper .cmd chama o adb.exe real: esse nao e "outro adb"
+        outros = [x for x in adb_em_execucao() if os.path.normcase(os.path.abspath(x)) != os.path.normcase(os.path.abspath(real))]
+        if outros:
+            texto = (
+                "Ha outro adb em execucao (%s). Se for de versao diferente do usado aqui (%s), os dois "
+                "derrubam o servidor um do outro. Feche o outro se a conexao oscilar. (clique para dispensar)" % ("; ".join(outros), versao)
+            )
+            app.resultados.put((lambda rc, s: app.mostra_aviso(texto), 0, ""))  # a UI consome na propria thread
+
+    threading.Thread(target=checa_adb_duplo, daemon=True).start()
+    if a.abrir_memoria:
+        root.after(1500, app.abre_memoria)
+    if a.abrir_arquivos:
+        root.after(1500, app.abre_arquivos)
+    if a.abrir_app:
+        root.after(1500, app.abre_painel)
+    root.mainloop()
+    cap.parar = True
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

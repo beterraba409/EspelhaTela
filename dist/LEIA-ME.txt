@@ -1,0 +1,47 @@
+EspelhaTela 1.0 - espelho e controle de tela Android para Windows
+
+COMO USAR
+1. Conecte o aparelho por USB com a depuracao USB ligada (ou use o botao "+ IP" para aparelho na rede).
+2. De duplo clique em EspelhaTela.exe UMA vez. A janela abre sozinha; a primeira abertura leva de 10 a 15 segundos.
+3. Clique e arraste sobre a imagem para tocar/rolar no aparelho. Digite no teclado do PC para escrever.
+   Passe o mouse sobre qualquer botao para ver o nome.
+
+REQUISITO
+- adb (Android SDK platform-tools). O programa procura o adb sozinho: variavel ADB, PATH,
+  ANDROID_SDK_ROOT/ANDROID_HOME ou %LOCALAPPDATA%\Android\Sdk\platform-tools.
+  Se nao tiver, copie a pasta platform-tools para ao lado do EspelhaTela.exe.
+- Nao use junto com outro espelho que traga um adb de versao diferente:
+  os dois derrubam o servidor um do outro. O programa avisa quando ve outro adb em execucao.
+- Se a lista de aparelhos vier vazia porque o adb do PATH usa outra porta (ex.: um adb.cmd com -P 5038),
+  aparece uma faixa amarela com o botao "Usar a porta N". O rodape mostra a porta em uso.
+
+DESEMPENHO
+- Modo de captura (lista ao lado do aparelho): Video - Rapido / Equilibrado / Nitido, ou Quadros (leve).
+  Em aparelho fraco ou durante rodada de automacao, prefira Quadros (leve).
+- O rodape mostra se o clique esta "instantaneo" (injetor) ou "via adb (lento)" (plano B).
+
+BARRA LATERAL
+- Pausar, Salvar captura (Imagens\EspelhaTela), Tela cheia
+- Voltar, Inicio, Recentes, Volume, Ligar/desligar tela
+- Seletor (F6): clique num elemento da tela para copiar o seletor do Maestro (id, texto, ponto).
+  Nesse modo o clique nao vai para o aparelho; Esc sai. Nao use com flow do Maestro rodando.
+- Instalar APK / Desinstalar APK (com atalho para os seus apps favoritos)
+- Exportar Logcat: salva em arquivo o log dos ultimos 2, 5 ou 10 minutos (pasta Documentos\EspelhaTela\Logcat)
+- App e aparelho: versao de qualquer app, abrir/parar/limpar dados, permissoes, favoritos e
+  preparar o aparelho para automacao (com restauracao dos valores antigos)
+- Arquivos: navegar nas pastas do aparelho, baixar, enviar, abrir, excluir
+- Memoria: gerenciador de tarefas com a memoria de cada app (tem chave liga/desliga)
+- O botao com tres tracos, ao lado da lista de aparelhos, mostra/oculta a barra lateral (F9)
+
+ATALHOS: Ctrl+S salva captura, F11 tela cheia, F9 barra lateral, F6 seletor.
+
+OBSERVACOES
+- Seus cliques mexem no aparelho de verdade; nao existe modo somente leitura.
+- Alguns aparelhos restringem o logcat ao adb; nesse caso a exportacao avisa que o log veio vazio.
+- Aparelho "nao autorizado": aceite "Permitir depuracao" na tela dele (marque "Sempre permitir").
+- O Windows/antivirus pode alertar por ser um programa novo sem assinatura digital.
+  Se acontecer, libere o arquivo (Propriedades > Desbloquear).
+- Para conferir o ambiente: EspelhaTela.exe --diagnostico (grava %TEMP%\espelhatela-diagnostico.txt).
+- Preferencias ficam em %APPDATA%\EspelhaTela\config.json.
+
+Codigo e novas versoes: veja o repositorio do projeto (licenca MIT).

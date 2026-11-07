@@ -1,103 +1,165 @@
-# EspelhaTela
+<h1 align="center">EspelhaTela</h1>
 
-Espelho e controle de tela Android numa **janela própria do Windows**, sem navegador e sem servidor, no estilo
-Vysor/scrcpy, pensado para quem testa apps Android no dia a dia: QA, automação de testes e desenvolvimento.
+<p align="center">
+  <b>Espelhe e controle um aparelho Android direto no Windows, numa janela própria.</b><br>
+  Feito para quem testa apps no dia a dia: QA, automação de testes e desenvolvimento mobile.
+</p>
 
-Além do espelho, a ferramenta reúne, a um clique, o que costuma exigir um terminal com `adb`:
-- instalar e desinstalar APK;
-- navegar pelos arquivos do aparelho;
-- acompanhar a memória de cada app;
-- exportar o logcat;
-- preparar o aparelho para automação;
-- **copiar o seletor de qualquer elemento da tela pronto para o [Maestro](https://maestro.mobile.dev)**.
+<p align="center">
+  <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows-10%20%7C%2011-0078D6">
+  <img alt="Python 3.8+" src="https://img.shields.io/badge/Python-3.8%2B-3776AB">
+  <img alt="Android 4.1+" src="https://img.shields.io/badge/Android-4.1%2B-3DDC84">
+  <img alt="Maestro" src="https://img.shields.io/badge/Maestro-seletores-7c4dff">
+  <a href="LICENSE"><img alt="Licença MIT" src="https://img.shields.io/badge/licen%C3%A7a-MIT-green"></a>
+</p>
 
-## Por que existe
+<p align="center">
+  <img src="docs/img/espelho.png" width="360" alt="Espelho do aparelho com a barra lateral de ações">
+  &nbsp;&nbsp;
+  <img src="docs/img/seletor.png" width="360" alt="Seletor mostrando o seletor do Maestro do item clicado">
+</p>
 
-Espelhos que trazem o próprio `adb` (de outra versão) derrubam o servidor adb de quem já estava usando, e a
-automação perde a sessão (`protocol fault`) no meio de um teste. O EspelhaTela usa **o mesmo adb do Android SDK**
-que as suas ferramentas, nunca chama `start-server` nem `kill-server`, e avisa quando vê outro adb rodando.
+<p align="center"><i>À esquerda, o espelho com vídeo fluido e clique instantâneo. À direita, o <b>Seletor</b>: clique num elemento e copie o seletor do Maestro.</i></p>
 
-## Desempenho
+---
 
-| Parte | Como funciona |
-|---|---|
-| Imagem | **Vídeo H.264** (`screenrecord`, decodificado com PyAV): dezenas de quadros por segundo. Perfis Rápido, Equilibrado e Nítido, e o modo "Quadros (leve)" para aparelhos fracos. |
-| Clique | **Injetor sempre ativo** (`injetor/`, ~3,5 KB): um processo Java no aparelho recebe os eventos por uma conexão já aberta, com toque, arraste e rolagem em tempo real. É a mesma técnica do scrcpy. |
-| Retorno visual | Um círculo aparece no ponto do clique **na hora**, antes de o aparelho responder. |
+## ✨ Destaques
 
-Cada parte tem um plano B automático, então funciona em qualquer aparelho:
-- se o vídeo não estiver disponível, a ferramenta tenta o tamanho nativo e depois cai para quadros;
-- se o firmware bloquear o injetor, os toques passam a ir pelo `adb shell input`, mais lento mas universal;
-- o rodapé mostra o que está em uso: `VIDEO` ou `quadros`, `clique instantaneo` ou `clique via adb (lento)`, e a porta do servidor adb.
+- **Fluido de verdade.** Vídeo H.264 com dezenas de quadros por segundo, e o toque chega ao aparelho na hora por um injetor que fica sempre ativo (a mesma técnica do scrcpy).
+- **Seletor para o Maestro.** Clique em qualquer botão ou texto da tela e copie `id:`, `text:`, `assertVisible` ou `point:` prontos para colar no YAML. Se o id se repete, a sugestão já vem com `index:`.
+- **Não derruba a sua automação.** Usa o mesmo `adb` do Android SDK, nunca reinicia o servidor adb e avisa quando outro adb ou outra porta podem dar conflito.
+- **O `adb` sem terminal.** Instalar e desinstalar APK, gerenciador de arquivos, monitor de memória, exportação de logcat, conexão por IP e preparo do aparelho para automação, cada um a um clique.
+- **Funciona em qualquer aparelho.** Cada parte tem plano B automático: sem vídeo, ele usa quadros; sem injetor, usa o `adb shell input`.
 
-## O que tem
+## 🚀 Comece em 1 minuto
 
-| Recurso | Para que serve |
-|---|---|
-| Espelho + **controle** | Clique, arraste, rolagem e teclado do PC vão para o aparelho. |
-| Voltar / Início / Recentes / Volume / Tela | Teclas do Android. |
-| Salvar captura | PNG em `Imagens\EspelhaTela` (Ctrl+S). |
-| Tela cheia | F11. |
-| **Seletor** (F6) | Modo de inspeção. O mouse destaca o elemento sob ele e o clique **não vai para o aparelho**: ele escolhe o elemento e mostra o seletor do Maestro pronto para copiar. As opções são `id:` (o `resource-id`; no React Native é o `testID`), o id do elemento clicável que o contém, `text:` (texto visível ou de um filho), accessibilityLabel, `assertVisible` e, como último recurso, `point:` em porcentagem. Um id repetido ganha `index:`. |
-| **Exportar logcat** | Salva o log dos **últimos 2, 5 ou 10 minutos** em `Documentos\EspelhaTela\Logcat`, usando a hora do aparelho. |
-| **+ IP** | `adb connect` pela rede. O endereço fica salvo e é reconectado sozinho. Aparelho `unauthorized` ou `offline` aparece no rodapé com o que fazer. |
-| **App e aparelho** | Para qualquer app instalado: versão, código, datas, PID, abrir, parar, reiniciar, limpar dados e conceder permissões. Do aparelho: modelo, Android, bateria, IP e ANDROID_ID. **Preparar para automação** desliga as animações, mantém a tela ligada e trava a rotação, guardando os valores antigos para restaurar. Marque seus apps como **★ favoritos** para tê-los no topo. |
-| Instalar / Desinstalar APK | `adb install -r` (com tratamento de downgrade) e `adb uninstall` de vários pacotes, com atalho para marcar os favoritos. |
-| Arquivos | Navega pelas pastas do aparelho: baixar, enviar, abrir no PC, criar pasta, renomear e excluir (só em `/sdcard`, `/storage` e `/data/local/tmp`). |
-| Memória | Gerenciador de tarefas: RSS por processo, PSS sob demanda, variação desde o início, gráficos, detalhe por app e exportação para CSV. Tem chave liga/desliga. |
-| **Aviso de adb e porta** | Se o `adb` do PATH é um wrapper (`.cmd`/`.bat` com `-P <porta>`) ou `ADB_SERVER_PORT` aponta para um servidor sem aparelhos, e outro servidor adb tem o aparelho, uma faixa avisa e oferece **Usar a porta N**. |
+**Sem instalar nada:**
+1. Baixe o `EspelhaTela-<versão>.zip` em [**Releases**](../../releases) e extraia.
+2. Ligue a **depuração USB** no aparelho e conecte-o ao PC.
+3. Dê dois cliques em `EspelhaTela.exe`. A primeira abertura leva de 10 a 15 s.
 
-## Instalar e usar
+Você precisa do `adb` do [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools). Ele é procurado sozinho na variável `ADB`, no `PATH`, em `ANDROID_SDK_ROOT`/`ANDROID_HOME`, em `%LOCALAPPDATA%\Android\Sdk` ou ao lado do `.exe`.
 
-Para quem só quer usar, sem Python: baixe o `EspelhaTela-<versão>.zip` em **Releases**, extraia e dê dois cliques
-em `EspelhaTela.exe`. A primeira abertura leva de 10 a 15 s.
-
-Para rodar a partir do código:
+**A partir do código:**
 
 ```bash
+git clone https://github.com/beterraba409/EspelhaTela.git
+cd EspelhaTela
 pip install pillow av
-python espelha_tela.py                    # abre a janela
-python espelha_tela.py --serial 0123abcd  # aparelho especifico
-python espelha_tela.py --abrir-app        # ja abre um painel (tambem --abrir-memoria, --abrir-arquivos)
-python espelha_tela.py --adb C:\caminho\adb.exe
-python espelha_tela.py --diagnostico      # grava %TEMP%\espelhatela-diagnostico.txt (adb, porta, video, injetor) e sai
-python testes_sem_tela.py                 # verificacoes sem tela e sem aparelho
+python espelha_tela.py
 ```
 
-Se preferir não ver o console, use o `iniciar.bat`. Para gerar o `.exe`, rode `compilar.bat`, que monta um ambiente
-isolado com PyInstaller, Pillow e PyAV. Recompile o injetor (`espelha-input.jar`) só se mudar o
-`injetor/src/espelhatela/Injector.java`: `python injetor\build.py` (precisa do JDK e do Android SDK).
+## 🧰 O que tem
 
-**Requisitos:**
-- Windows 10 ou 11;
-- `adb` do Android SDK platform-tools. Ele é procurado na variável `ADB`, no `PATH`, em `ANDROID_SDK_ROOT`/`ANDROID_HOME` e em `%LOCALAPPDATA%\Android\Sdk`, ou como `adb.exe` ao lado do programa;
-- aparelho com a depuração USB ligada.
+| | Recurso | Para que serve |
+|---|---|---|
+| 🖥️ | **Espelho + controle** | Clique, arraste, rolagem e teclado do PC vão para o aparelho. Modos Vídeo (Rápido, Equilibrado, Nítido) ou Quadros (leve). |
+| 🎯 | **Seletor** (F6) | O mouse destaca o elemento sob ele, e o clique escolhe o elemento em vez de tocar no aparelho. As sugestões são `id:` (o `resource-id`; no React Native, o `testID`), o id do elemento clicável que o contém, `text:`, accessibilityLabel, `assertVisible` e `point:`. |
+| 📱 | **App e aparelho** | Para qualquer app instalado: versão, datas, PID, abrir, parar, reiniciar, limpar dados, conceder permissões e marcar como **★ favorito**. Do aparelho: modelo, Android, bateria, IP e ANDROID_ID. |
+| 🤖 | **Preparar para automação** | Desliga as animações, mantém a tela ligada e trava a rotação. Guarda os valores antigos para restaurar com um clique. |
+| 📦 | **Instalar / Desinstalar APK** | `adb install -r` com tratamento de downgrade e desinstalação de vários pacotes de uma vez. |
+| 📁 | **Arquivos** | Navegar, baixar, enviar, abrir no PC, criar pasta, renomear e excluir (em `/sdcard`, `/storage` e `/data/local/tmp`). |
+| 📊 | **Memória** | Gerenciador de tarefas com RSS por processo, PSS sob demanda, variação desde o início, gráficos e exportação para CSV. |
+| 📜 | **Exportar logcat** | O log dos últimos 2, 5 ou 10 minutos num arquivo, usando a hora do aparelho. |
+| 🌐 | **+ IP** | `adb connect` pela rede. O endereço fica salvo e é reconectado sozinho. |
+| 🔌 | **Aviso de adb e porta** | Detecta um `adb.cmd` ou `ADB_SERVER_PORT` apontando para um servidor sem aparelhos e oferece **Usar a porta N**. |
+| 📷 | **Captura e tela cheia** | PNG em `Imagens\EspelhaTela` (Ctrl+S) e tela cheia (F11). |
 
-O código está em três arquivos:
-- `espelha_tela.py`: a janela;
-- `seletor.py`: a árvore da tela e os seletores do Maestro;
-- `adb_servidor.py`: a porta do servidor adb e a detecção de wrapper.
+**Atalhos:** `F6` liga o seletor · `F9` mostra/oculta a barra lateral · `F11` tela cheia · `Ctrl+S` salva a captura · `Esc` sai do seletor.
 
-## Convivência com a automação
+## 🎯 Seletor para o Maestro: exemplo
 
-- Só captura com a janela visível e não pausada.
-- O vídeo usa o encoder do aparelho, que pode pesar em aparelhos fracos. Em rodadas longas, troque para **Quadros (leve)**.
-- **Os seus cliques mexem no aparelho de verdade**: cuidado com uma rodada em andamento.
-- O **Seletor** usa `uiautomator dump`, que registra um UiAutomation no aparelho. Com um flow do Maestro rodando, isso pode derrubar o driver dele. Use o seletor só com o aparelho livre; a leitura só acontece quando você clica.
-- "Preparar para automação", "Limpar dados" e "Desinstalar" mudam o aparelho, e todos pedem confirmação.
+Ligue o **Seletor**, clique em "Bateria" nas Configurações do Android, e ele sugere:
 
-## Limites conhecidos
+```yaml
+- tapOn:
+    id: "title"
+    index: 3          # 9 elementos com esse id na tela
 
-- Alguns firmwares restringem o logcat ao shell. Nesse caso a exportação avisa, em vez de gerar um arquivo vazio.
-- O `.exe` de arquivo único leva de 9 a 12 s para abrir na primeira vez, porque extrai ~45 MB. Não clique duas vezes.
+- tapOn: "Bateria"
+
+- tapOn:
+    point: "22%,44%"  # ultimo recurso
+```
+
+Em apps React Native, o `testID` aparece como `id:`, que é o seletor mais estável para os seus flows.
+
+> ⚠️ O seletor lê a tela com `uiautomator dump`. Não use durante um flow do Maestro em andamento: os dois disputam o UiAutomation do aparelho.
+
+## ⚡ Como ficou rápido
+
+| Parte | Abordagem comum | EspelhaTela |
+|---|---|---|
+| Imagem | `screencap` quadro a quadro (cerca de 1 qd/s em aparelho fraco) | `screenrecord` H.264 decodificado com PyAV (dezenas de qd/s) |
+| Toque | `adb shell input tap`: um processo novo e uma JVM a cada toque (0,5 a 1 s) | Injetor Java de ~3,5 KB sempre aberto no aparelho, com resposta em milissegundos |
+| Retorno | Só quando a imagem atualiza | Um círculo aparece no ponto do clique na hora |
+
+## 🛠️ Para desenvolvedores
+
+```bash
+python espelha_tela.py --serial 0123abcd   # aparelho especifico
+python espelha_tela.py --adb C:\caminho\adb.exe
+python espelha_tela.py --abrir-app         # tambem --abrir-memoria e --abrir-arquivos
+python espelha_tela.py --diagnostico       # relatorio em %TEMP%\espelhatela-diagnostico.txt
+python testes_sem_tela.py                  # verificacoes sem tela e sem aparelho
+compilar.bat                               # gera dist\EspelhaTela.exe (PyInstaller, arquivo unico)
+python injetor\build.py                    # recompila o injetor (JDK + Android SDK)
+```
+
+| Arquivo | Papel |
+|---|---|
+| `espelha_tela.py` | Janela (Tkinter), captura, controle e painéis |
+| `seletor.py` | Árvore da tela e seletores do Maestro |
+| `adb_servidor.py` | Porta do servidor adb e detecção de wrapper |
+| `injetor/` | Fonte do injetor de toques (`espelhatela.Injector`) |
+
+## ❓ Perguntas frequentes
+
+<details>
+<summary><b>A lista de aparelhos aparece vazia.</b></summary>
+
+Confira se a depuração USB está ligada e se você aceitou "Permitir depuração" na tela do aparelho. Se o seu `adb` usa outra porta (por exemplo, um `adb.cmd` com `-P 5038`), a faixa amarela oferece **Usar a porta N**. O `--diagnostico` mostra o adb, a porta e os servidores encontrados.
+</details>
+
+<details>
+<summary><b>O clique está lento ("clique via adb").</b></summary>
+
+O firmware do aparelho bloqueou o injetor, e a ferramenta caiu para o `adb shell input`, que é mais lento mas funciona em qualquer aparelho.
+</details>
+
+<details>
+<summary><b>O Windows ou o antivírus alertou sobre o .exe.</b></summary>
+
+É um programa novo e sem assinatura digital. Libere em Propriedades > Desbloquear, ou rode a partir do código com `python espelha_tela.py`.
+</details>
+
+<details>
+<summary><b>Posso usar durante uma rodada de automação?</b></summary>
+
+Pode olhar à vontade: em rodadas longas, prefira o modo **Quadros (leve)**. Lembre-se de que os seus cliques mexem no aparelho de verdade, e de que o seletor não deve ser usado com um flow rodando.
+</details>
+
+## 📌 Limites conhecidos
+
 - Texto com acentos não passa pelo teclado do PC.
-- O vídeo é reiniciado a cada 180 s (limite do `screenrecord`), com uma pausa de cerca de 1 s.
-- Depois de uma rotação de tela, pode ser preciso reiniciar o vídeo (trocar o modo e voltar).
-- Por ser um programa novo sem assinatura digital, o Windows ou o antivírus podem alertar. Nesse caso, use Propriedades > Desbloquear.
+- O vídeo reinicia a cada 180 s (limite do `screenrecord`), com uma pausa de cerca de 1 s.
+- Depois de girar a tela, pode ser preciso trocar o modo de captura e voltar.
+- Alguns firmwares restringem o logcat ao shell. Nesse caso a exportação avisa em vez de gerar um arquivo vazio.
 
-As preferências (barra lateral, modo de captura, favoritos, porta do adb e medição de memória) ficam em
-`%APPDATA%\EspelhaTela\config.json`.
+## 🗺️ Próximos passos
+
+Gravação de vídeo e "replay" dos últimos segundos, um pacote de evidência de bug, vários aparelhos lado a lado e a gravação de um flow do Maestro a partir dos cliques. A lista completa está no [ROADMAP](ROADMAP.md).
+
+## 🤝 Contribuindo
+
+Sugestões, bugs e PRs são bem-vindos. Veja o [CONTRIBUTING](CONTRIBUTING.md).
+
+---
+
+### English (short)
+
+**EspelhaTela** ("mirror screen") is a Windows desktop app to mirror and control an Android device, in the spirit of Vysor/scrcpy, built for QA and test automation. It offers smooth H.264 video, instant touch through an always-on injector, and a **Maestro selector picker**: click any element and copy `id:`, `text:` or `point:`. It also bundles APK install/uninstall, a file manager, a memory monitor, logcat export, Wi-Fi adb and a "prepare device for automation" switch. It uses your SDK's `adb` and never restarts the adb server. To try it, download the `.exe` from Releases or run `python espelha_tela.py`. MIT licensed. The UI is in Portuguese.
 
 ## Licença
 
-[MIT](LICENSE). Use, adapte e compartilhe.
+[MIT](LICENSE) © Samuel Evaristo

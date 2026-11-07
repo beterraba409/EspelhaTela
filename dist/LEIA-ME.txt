@@ -44,4 +44,4 @@ OBSERVACOES
 - Para conferir o ambiente: EspelhaTela.exe --diagnostico (grava %TEMP%\espelhatela-diagnostico.txt).
 - Preferencias ficam em %APPDATA%\EspelhaTela\config.json.
 
-Codigo e novas versoes: veja o repositorio do projeto (licenca MIT).
+Codigo e novas versoes: https://github.com/beterraba409/EspelhaTela (licenca MIT).

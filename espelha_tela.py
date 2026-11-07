@@ -22,7 +22,8 @@ Estilo Vysor: barra lateral com acoes, tela do aparelho no centro, rodape com st
 Uso:
     python espelha_tela.py                    # abre a janela
     python espelha_tela.py --serial 0123abcd  # aparelho especifico
-Atalhos: Ctrl+S salva a captura, F11 tela cheia, F9 barra lateral.
+Atalhos: Ctrl+V cola no aparelho o texto do PC, Ctrl+C traz o texto copiado no aparelho, Ctrl+S salva
+a captura, F11 tela cheia, F9 barra lateral.
 """
 
 import argparse
@@ -40,7 +41,7 @@ import threading
 import time
 import tempfile
 import zlib
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 # No .exe sem console (--windowed) nao ha stdout/stderr; evita quebrar em print/argparse.
 if sys.stdout is None:
@@ -65,7 +66,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adb_servidor  # noqa: E402  (porta do servidor adb, aviso de wrapper)
 import seletor  # noqa: E402  (seletor de identificador para o Maestro)
 
-VERSAO = "1.0"
+VERSAO = "1.1"
 SEM_JANELA = 0x08000000 if os.name == "nt" else 0
 
 
@@ -218,6 +219,7 @@ class Injetor:
         self.t_erro = 0.0
         self.iniciando = False
         self.lock = threading.Lock()
+        self.respostas = queue.Queue()  # linhas "CLIP ..." e "CLIPSET ..." do injetor
 
     def ok(self, serial):
         return bool(self.pronto and self.serial == serial and self.proc is not None and self.proc.poll() is None)
@@ -263,6 +265,8 @@ class Injetor:
                         self.t_erro = time.time()
                     elif linha.startswith("ERR"):
                         self.ultimo_erro = linha[:120]
+                    elif linha.split(" ", 1)[0] in ("CLIP", "CLIPSET"):
+                        self.respostas.put(linha)
 
             threading.Thread(target=leitor, daemon=True).start()
             t0 = time.time()
@@ -286,6 +290,23 @@ class Injetor:
         except Exception:
             self.pronto = False
             return False
+
+    def pergunta(self, linha, serial, tipo, espera=2.0):
+        """Envia um comando e espera a resposta `tipo` (ex.: "CLIP"). Devolve o resto da linha ou None."""
+        while not self.respostas.empty():
+            self.respostas.get_nowait()  # resposta velha de um pedido que expirou
+        if not self.envia(linha, serial):
+            return None
+        fim = time.time() + espera
+        while time.time() < fim:
+            try:
+                r = self.respostas.get(timeout=max(0.01, fim - time.time()))
+            except queue.Empty:
+                return None
+            cab, _, resto = r.partition(" ")
+            if cab == tipo:
+                return resto
+        return None
 
     def parar(self):
         p, self.proc, self.pronto = self.proc, None, False
@@ -1832,9 +1853,19 @@ FG = "#e6e6e6"
 FG2 = "#8e8e93"
 ACENTO = "#7c4dff"  # toggles ligados
 PERIGO = "#e5484d"
+
+
 def favoritos(cfg):
     """Pacotes que o usuario marcou como favoritos no painel do app (guardados no config.json)."""
     return [p for p in (cfg.get("favoritos") or []) if isinstance(p, str) and re.fullmatch(r"[A-Za-z0-9._]+", p)]
+
+
+def resumo_texto(txt, limite=40):
+    """Texto de uma linha, cortado, para os avisos de copiar e colar."""
+    t = " ".join(txt.split())
+    return t if len(t) <= limite else t[: limite - 3] + "..."
+
+
 CHAVES = {  # teclas de navegacao que o Android entende
     "BackSpace": "67", "Return": "66", "Tab": "61", "Escape": "111",
     "Up": "19", "Down": "20", "Left": "21", "Right": "22", "Delete": "112",
@@ -2440,6 +2471,10 @@ class App:
             return  # digitando num campo do proprio programa (filtro do logcat etc.): nao vai para o aparelho
         if self.sel_on and e.keysym == "Escape":
             return self.alterna_seletor()
+        if e.state & 0x4 and e.keysym.lower() == "v":
+            return self.colar_no_aparelho()
+        if e.state & 0x4 and e.keysym.lower() == "c":
+            return self.copiar_do_aparelho()
         if e.keysym in CHAVES:
             return self.tecla(CHAVES[e.keysym])
         c = e.char
@@ -2450,6 +2485,46 @@ class App:
                 self.enviar("text", "%s")
             elif re.fullmatch(r"[A-Za-z0-9.,_@:/+=-]", c):
                 self.enviar("text", c)
+
+    def colar_no_aparelho(self):
+        """Ctrl+V: o texto copiado no PC vai para a area de transferencia do aparelho e e colado
+        no campo em foco (com acentos). Sem o injetor, digita so os caracteres que o adb aceita."""
+        try:
+            txt = self.root.clipboard_get()
+        except tk.TclError:
+            txt = ""
+        txt = txt.replace("\r\n", "\n")
+        if not txt:
+            return self.aviso_rapido("nada para colar: a area de transferencia do PC esta vazia")
+        if self.inj_envia("v " + quote(txt, safe="")):
+            return self.aviso_rapido("colado no aparelho: %s" % resumo_texto(txt), 3)
+        simples = "".join(c for c in txt.replace("\n", " ") if re.fullmatch(r"[A-Za-z0-9 .,_@:/+=-]", c))
+        if simples:
+            self.enviar("text", simples.replace(" ", "%s"))
+        self.aviso_rapido("colado sem acentos e simbolos (clique via adb): %s" % resumo_texto(simples), 5)
+
+    def copiar_do_aparelho(self):
+        """Ctrl+C: copia a selecao no aparelho (KEYCODE_COPY) e traz o texto para o PC."""
+        serial = self.cap.serial
+        if not self.inj.ok(serial):
+            return self.aviso_rapido("copiar do aparelho precisa do clique instantaneo (injetor), que nao esta ativo", 5)
+
+        def trabalho():
+            self.inj_envia("k 278")  # KEYCODE_COPY: copia o texto selecionado no app
+            time.sleep(0.3)
+            r = self.inj.pergunta("g", serial, "CLIP")
+            txt = unquote(r) if r else ""
+            self.root.after(0, lambda: self._copiado_do_aparelho(txt, r is None))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _copiado_do_aparelho(self, txt, falhou):
+        if not txt:
+            return self.aviso_rapido("nao foi possivel ler a area de transferencia do aparelho" if falhou
+                                     else "a area de transferencia do aparelho esta vazia (selecione um texto antes)", 5)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(txt)
+        self.aviso_rapido("copiado do aparelho: %s" % resumo_texto(txt), 3)
 
     def mudou_captura(self, _e=None):
         nome = self.cb_cap.get()

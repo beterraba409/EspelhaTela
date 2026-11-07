@@ -33,7 +33,7 @@ BARRA LATERAL
 - Memoria: gerenciador de tarefas com a memoria de cada app (tem chave liga/desliga)
 - O botao com tres tracos, ao lado da lista de aparelhos, mostra/oculta a barra lateral (F9)
 
-ATALHOS: Ctrl+S salva captura, F11 tela cheia, F9 barra lateral, F6 seletor.
+ATALHOS: Ctrl+V cola no aparelho o texto do PC, Ctrl+C copia do aparelho para o PC, Ctrl+S salva captura, F11 tela cheia, F9 barra lateral, F6 seletor.
 
 OBSERVACOES
 - Seus cliques mexem no aparelho de verdade; nao existe modo somente leitura.

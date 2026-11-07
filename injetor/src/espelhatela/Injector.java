@@ -1,5 +1,7 @@
 package espelhatela;
 
+import android.content.ClipData;
+import android.os.IBinder;
 import android.os.SystemClock;
 import android.view.InputDevice;
 import android.view.InputEvent;
@@ -11,6 +13,7 @@ import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.lang.reflect.Method;
 import java.net.URLDecoder;
+import java.net.URLEncoder;
 
 /**
  * Injetor de eventos de entrada, sempre ativo, para o EspelhaTela.
@@ -25,6 +28,10 @@ import java.net.URLDecoder;
  *   k codigo         tecla (KeyEvent) pressionada e solta
  *   t texto          texto, codificado como URL (%20 para espaco)
  *   s x1 y1 x2 y2 ms deslize completo
+ *   c texto          poe o texto (URL) na area de transferencia do aparelho; responde "CLIPSET ok|falhou"
+ *   v texto          cola o texto: area de transferencia + KEYCODE_PASTE (com acentos); sem
+ *                    area de transferencia, digita o texto tecla a tecla
+ *   g                le a area de transferencia; responde "CLIP texto" (URL) ou "CLIP" vazio
  *   q                encerra
  *
  * Responde "READY" ao iniciar e "ERR ..." quando um comando falha.
@@ -35,6 +42,9 @@ public final class Injector {
     private static Method inject;
     private static long downTime;
     private static final int MODE_ASYNC = 0;
+    private static final int KEYCODE_PASTE = 279;
+    private static final String PACOTE = "com.android.shell";
+    private static Object clipboard;
 
     public static void main(String[] args) throws Exception {
         try {
@@ -101,6 +111,23 @@ public final class Injector {
                     }
                 }).start();
                 break;
+            case "c":
+                boolean ok = clipPoe(URLDecoder.decode(resto, "UTF-8"));
+                responde("CLIPSET " + (ok ? "ok" : "falhou"));
+                break;
+            case "v":
+                String txt = URLDecoder.decode(resto, "UTF-8");
+                if (clipPoe(txt)) {
+                    Thread.sleep(60);
+                    tecla(KEYCODE_PASTE);
+                } else {
+                    texto(txt);
+                }
+                break;
+            case "g":
+                String lido = clipLe();
+                responde(lido == null ? "CLIP" : "CLIP " + URLEncoder.encode(lido, "UTF-8").replace("+", "%20"));
+                break;
             case "q":
                 return false;
             default:
@@ -108,6 +135,84 @@ public final class Injector {
                 System.out.flush();
         }
         return true;
+    }
+
+    private static void responde(String s) {
+        System.out.println(s);
+        System.out.flush();
+    }
+
+    /** IClipboard do sistema por reflexao (como o scrcpy); null se o aparelho nao deixar. */
+    private static Object clip() throws Exception {
+        if (clipboard == null) {
+            Class<?> sm = Class.forName("android.os.ServiceManager");
+            IBinder b = (IBinder) sm.getMethod("getService", String.class).invoke(null, "clipboard");
+            clipboard = Class.forName("android.content.IClipboard$Stub").getMethod("asInterface", IBinder.class).invoke(null, b);
+        }
+        return clipboard;
+    }
+
+    /**
+     * Chama um metodo do IClipboard montando os argumentos pelo tipo: a assinatura muda a cada
+     * versao do Android (pacote; + userId no 10; + attributionTag no 12; + deviceId no 14...).
+     */
+    private static Object chamaClip(String nome, ClipData dado) throws Exception {
+        Object c = clip();
+        Throwable ultimo = null;
+        for (Method m : c.getClass().getMethods()) {
+            if (!m.getName().equals(nome)) {
+                continue;
+            }
+            Class<?>[] tipos = m.getParameterTypes();
+            Object[] args = new Object[tipos.length];
+            boolean primeiraString = true;
+            boolean serve = true;
+            for (int i = 0; i < tipos.length; i++) {
+                if (tipos[i] == ClipData.class) {
+                    args[i] = dado;
+                } else if (tipos[i] == String.class) {
+                    args[i] = primeiraString ? PACOTE : null;  // pacote; depois attributionTag
+                    primeiraString = false;
+                } else if (tipos[i] == int.class) {
+                    args[i] = 0;  // userId 0 e deviceId 0 (aparelho principal)
+                } else {
+                    serve = false;
+                }
+            }
+            if (!serve || (dado != null) != java.util.Arrays.asList(tipos).contains(ClipData.class)) {
+                continue;
+            }
+            try {
+                return m.invoke(c, args);
+            } catch (Throwable t) {
+                ultimo = t;
+            }
+        }
+        throw new Exception("IClipboard." + nome + " indisponivel" + (ultimo != null ? ": " + ultimo.getCause() : ""));
+    }
+
+    private static boolean clipPoe(String s) {
+        try {
+            chamaClip("setPrimaryClip", ClipData.newPlainText("EspelhaTela", s));
+            return true;
+        } catch (Throwable t) {
+            responde("ERR clip " + t);
+            return false;
+        }
+    }
+
+    private static String clipLe() {
+        try {
+            ClipData d = (ClipData) chamaClip("getPrimaryClip", null);
+            if (d == null || d.getItemCount() == 0) {
+                return null;
+            }
+            CharSequence t = d.getItemAt(0).getText();
+            return t == null ? null : t.toString();
+        } catch (Throwable t) {
+            responde("ERR clip " + t);
+            return null;
+        }
     }
 
     private static float f(String resto, int i) {

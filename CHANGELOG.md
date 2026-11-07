@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.1 - copiar e colar
+
+- **Ctrl+V** cola no aparelho o texto copiado no PC, com acentos e símbolos (pela área de transferência do Android).
+- **Ctrl+C** copia o texto selecionado no aparelho e o traz para o PC.
+- Antes, as duas teclas não faziam nada.
+
 ## 1.0 - primeira versão pública
 
 - Espelho por vídeo H.264 (três perfis) ou por quadros, com plano B automático.

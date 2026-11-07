@@ -63,9 +63,10 @@ python espelha_tela.py
 | 📜 | **Exportar logcat** | O log dos últimos 2, 5 ou 10 minutos num arquivo, usando a hora do aparelho. |
 | 🌐 | **+ IP** | `adb connect` pela rede. O endereço fica salvo e é reconectado sozinho. |
 | 🔌 | **Aviso de adb e porta** | Detecta um `adb.cmd` ou `ADB_SERVER_PORT` apontando para um servidor sem aparelhos e oferece **Usar a porta N**. |
+| 📋 | **Copiar e colar** | **Ctrl+V** cola no aparelho o texto copiado no PC, com acentos. **Ctrl+C** copia a seleção do aparelho para o PC. |
 | 📷 | **Captura e tela cheia** | PNG em `Imagens\EspelhaTela` (Ctrl+S) e tela cheia (F11). |
 
-**Atalhos:** `F6` liga o seletor · `F9` mostra/oculta a barra lateral · `F11` tela cheia · `Ctrl+S` salva a captura · `Esc` sai do seletor.
+**Atalhos:** `Ctrl+V` cola no aparelho · `Ctrl+C` copia do aparelho · `F6` liga o seletor · `F9` mostra/oculta a barra lateral · `F11` tela cheia · `Ctrl+S` salva a captura · `Esc` sai do seletor.
 
 ## 🎯 Seletor para o Maestro: exemplo
 
@@ -141,7 +142,7 @@ Pode olhar à vontade: em rodadas longas, prefira o modo **Quadros (leve)**. Lem
 
 ## 📌 Limites conhecidos
 
-- Texto com acentos não passa pelo teclado do PC.
+- Texto com acentos não passa digitando pelo teclado do PC. Para isso, copie no PC e cole com `Ctrl+V`.
 - O vídeo reinicia a cada 180 s (limite do `screenrecord`), com uma pausa de cerca de 1 s.
 - Depois de girar a tela, pode ser preciso trocar o modo de captura e voltar.
 - Alguns firmwares restringem o logcat ao shell. Nesse caso a exportação avisa em vez de gerar um arquivo vazio.

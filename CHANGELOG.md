@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.3 - primeira atualização pelo próprio app
+
+- Versão para quem tem a 1.2 atualizar pelo botão **Buscar atualizações**, com o ícone novo e os últimos ajustes de visual.
+
 ## 1.2 - Vision, instalador e mais leve em máquina lenta
 
 - **Novo nome: Vision** (antigo EspelhaTela). Na primeira abertura, a configuração salva pelo EspelhaTela é trazida junto.

@@ -69,7 +69,7 @@ import seletor  # noqa: E402  (seletor de identificador para o Maestro)
 import visual  # noqa: E402  (botoes, icones do Windows, barra lateral e rodape)
 import atualizacao  # noqa: E402  (busca de versoes novas no GitHub)
 
-VERSAO = "1.2"
+VERSAO = "1.3"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }

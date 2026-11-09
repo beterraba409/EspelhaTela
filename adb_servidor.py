@@ -2,7 +2,7 @@
 """Descobre com qual servidor adb (porta) cada adb conversa e quais aparelhos cada servidor tem.
 
 Motivo: um `adb.cmd`/`adb.bat` no PATH pode ser um wrapper que repassa `-P <porta>` para o adb.exe
-real. O EspelhaTela entao conversa com um servidor sem aparelhos enquanto o aparelho esta no servidor
+real. O Vision entao conversa com um servidor sem aparelhos enquanto o aparelho esta no servidor
 padrao (5037), e a lista aparece vazia sem explicacao.
 
 Nada aqui sobe ou derruba servidor: a consulta aos servidores e feita pelo protocolo do adb direto

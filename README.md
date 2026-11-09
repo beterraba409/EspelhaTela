@@ -1,4 +1,6 @@
-<h1 align="center">EspelhaTela</h1>
+<h1 align="center">Vision</h1>
+
+<p align="center"><sub>antigo EspelhaTela</sub></p>
 
 <p align="center">
   <b>Espelhe e controle um aparelho Android direto no Windows, numa janela própria.</b><br>
@@ -33,10 +35,10 @@
 
 ## 🚀 Comece em 1 minuto
 
-**Sem instalar nada:**
-1. Baixe o `EspelhaTela-<versão>.zip` em [**Releases**](../../releases) e extraia.
+**Pelo instalador:**
+1. Baixe o instalador `Vision-Setup-<versão>.exe` em [**Releases**](../../releases) e instale. Não pede administrador. Se preferir sem instalar, use o `Vision-<versão>.zip`.
 2. Ligue a **depuração USB** no aparelho e conecte-o ao PC.
-3. Dê dois cliques em `EspelhaTela.exe`. A primeira abertura leva de 10 a 15 s.
+3. Abra o **Vision** pelo Menu Iniciar. A primeira abertura leva de 10 a 15 s.
 
 Você precisa do `adb` do [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools). Ele é procurado sozinho na variável `ADB`, no `PATH`, em `ANDROID_SDK_ROOT`/`ANDROID_HOME`, em `%LOCALAPPDATA%\Android\Sdk` ou ao lado do `.exe`.
 
@@ -64,7 +66,7 @@ python espelha_tela.py
 | 🌐 | **+ IP** | `adb connect` pela rede. O endereço fica salvo e é reconectado sozinho. |
 | 🔌 | **Aviso de adb e porta** | Detecta um `adb.cmd` ou `ADB_SERVER_PORT` apontando para um servidor sem aparelhos e oferece **Usar a porta N**. |
 | 📋 | **Copiar e colar** | **Ctrl+V** cola no aparelho o texto copiado no PC, com acentos. **Ctrl+C** copia a seleção do aparelho para o PC. |
-| 📷 | **Captura e tela cheia** | PNG em `Imagens\EspelhaTela` (Ctrl+S) e tela cheia (F11). |
+| 📷 | **Captura e tela cheia** | PNG em `Imagens\Vision` (Ctrl+S) e tela cheia (F11). |
 
 **Atalhos:** `Ctrl+V` cola no aparelho · `Ctrl+C` copia do aparelho · `F6` liga o seletor · `F9` mostra/oculta a barra lateral · `F11` tela cheia · `Ctrl+S` salva a captura · `Esc` sai do seletor.
 
@@ -89,11 +91,12 @@ Em apps React Native, o `testID` aparece como `id:`, que é o seletor mais está
 
 ## ⚡ Como ficou rápido
 
-| Parte | Abordagem comum | EspelhaTela |
+| Parte | Abordagem comum | Vision |
 |---|---|---|
 | Imagem | `screencap` quadro a quadro (cerca de 1 qd/s em aparelho fraco) | `screenrecord` H.264 decodificado com PyAV (dezenas de qd/s) |
 | Toque | `adb shell input tap`: um processo novo e uma JVM a cada toque (0,5 a 1 s) | Injetor Java de ~3,5 KB sempre aberto no aparelho, com resposta em milissegundos |
 | Retorno | Só quando a imagem atualiza | Um círculo aparece no ponto do clique na hora |
+| Desenho | Todo quadro convertido e redimensionado | Só o quadro que vai para a tela, já no tamanho da janela, numa passada só |
 
 ## 🛠️ Para desenvolvedores
 
@@ -101,9 +104,9 @@ Em apps React Native, o `testID` aparece como `id:`, que é o seletor mais está
 python espelha_tela.py --serial 0123abcd   # aparelho especifico
 python espelha_tela.py --adb C:\caminho\adb.exe
 python espelha_tela.py --abrir-app         # tambem --abrir-memoria e --abrir-arquivos
-python espelha_tela.py --diagnostico       # relatorio em %TEMP%\espelhatela-diagnostico.txt
+python espelha_tela.py --diagnostico       # relatorio em %TEMP%\vision-diagnostico.txt
 python testes_sem_tela.py                  # verificacoes sem tela e sem aparelho
-compilar.bat                               # gera dist\EspelhaTela.exe (PyInstaller, arquivo unico)
+compilar.bat                               # gera dist\Vision.exe (PyInstaller, arquivo unico)
 python injetor\build.py                    # recompila o injetor (JDK + Android SDK)
 ```
 
@@ -159,7 +162,7 @@ Sugestões, bugs e PRs são bem-vindos. Veja o [CONTRIBUTING](CONTRIBUTING.md).
 
 ### English (short)
 
-**EspelhaTela** ("mirror screen") is a Windows desktop app to mirror and control an Android device, in the spirit of Vysor/scrcpy, built for QA and test automation. It offers smooth H.264 video, instant touch through an always-on injector, and a **Maestro selector picker**: click any element and copy `id:`, `text:` or `point:`. It also bundles APK install/uninstall, a file manager, a memory monitor, logcat export, Wi-Fi adb and a "prepare device for automation" switch. It uses your SDK's `adb` and never restarts the adb server. To try it, download the `.exe` from Releases or run `python espelha_tela.py`. MIT licensed. The UI is in Portuguese.
+**Vision** (formerly EspelhaTela, "mirror screen") is a Windows desktop app to mirror and control an Android device, in the spirit of Vysor/scrcpy, built for QA and test automation. It offers smooth H.264 video, instant touch through an always-on injector, and a **Maestro selector picker**: click any element and copy `id:`, `text:` or `point:`. It also bundles APK install/uninstall, a file manager, a memory monitor, logcat export, Wi-Fi adb and a "prepare device for automation" switch. It uses your SDK's `adb` and never restarts the adb server. To try it, download the installer (`Vision-Setup-<version>.exe`) from Releases or run `python espelha_tela.py`. MIT licensed. The UI is in Portuguese.
 
 ## Licença
 

@@ -16,7 +16,7 @@ import java.net.URLDecoder;
 import java.net.URLEncoder;
 
 /**
- * Injetor de eventos de entrada, sempre ativo, para o EspelhaTela.
+ * Injetor de eventos de entrada, sempre ativo, para o Vision.
  *
  * Roda no aparelho via app_process (usuario shell) e le comandos de texto na entrada padrao,
  * uma linha por comando. Como o processo fica vivo, cada toque custa microssegundos em vez de

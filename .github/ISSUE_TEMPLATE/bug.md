@@ -17,10 +17,10 @@ labels: bug
 **Ambiente**
 - Aparelho e versão do Android:
 - Windows:
-- Versão do EspelhaTela (título do `--diagnostico`):
+- Versão do Vision (título do `--diagnostico`):
 - Rodapé da janela (VIDEO/quadros, tipo de clique, porta):
 
-**Diagnóstico** (conteúdo de `%TEMP%\espelhatela-diagnostico.txt`)
+**Diagnóstico** (conteúdo de `%TEMP%\vision-diagnostico.txt`)
 
 ```
 cole aqui

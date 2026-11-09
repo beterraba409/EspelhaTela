@@ -178,5 +178,135 @@ class TestSeletor(unittest.TestCase):
         self.assertIn("idle state", erro)
 
 
+try:
+    import av  # noqa: E402
+    from PIL import Image  # noqa: E402
+    import espelha_tela as E  # noqa: E402
+except ImportError:  # sem PyAV/Pillow: as verificacoes do video ficam de fora
+    E = None
+
+
+@unittest.skipIf(E is None, "PyAV ou Pillow ausentes")
+class Video(unittest.TestCase):
+    def _cap(self):
+        return E.Captura("adb", "x", 0.1)
+
+    def _quadro(self, w=32, h=64):
+        img = Image.new("RGB", (w, h), (200, 30, 30))
+        return av.VideoFrame.from_image(img).reformat(format="yuv420p")
+
+    def test_quadro_do_video_so_converte_quando_pedido(self):
+        cap = self._cap()
+        self.assertIsNone(cap.tamanho)
+        fr = self._quadro()
+        cap._av = fr  # como o leitor do video faz
+        self.assertEqual(cap.tamanho, (32, 64))
+        self.assertIsNone(cap._img)  # saber o tamanho nao converte nada
+        img = cap.frame
+        self.assertEqual(img.size, (32, 64))
+        self.assertIs(cap.frame, img)  # mesmo quadro: conversao reaproveitada
+        cap._av = self._quadro()
+        self.assertIsNot(cap.frame, img)  # quadro novo: conversao nova
+
+    def test_imagem_ja_sai_no_tamanho_da_janela(self):
+        cap = self._cap()
+        cap._av = self._quadro()
+        ampliada = cap.imagem(64, 128)
+        reduzida = cap.imagem(8, 16)
+        self.assertEqual((ampliada.size, reduzida.size), ((64, 128), (8, 16)))
+        r, g, b = ampliada.getpixel((30, 60))
+        self.assertTrue(r > 150 and g < 80 and b < 80, (r, g, b))  # cor preservada na conversao YUV -> RGB
+
+    def test_modo_quadros_continua_com_pil(self):
+        cap = self._cap()
+        cap._av = self._quadro()
+        cap.frame = Image.new("RGB", (10, 20))  # o modo quadros grava uma PIL.Image e descarta o video
+        self.assertEqual(cap.tamanho, (10, 20))
+        self.assertEqual(cap.imagem(20, 40).size, (20, 40))
+        cap.frame = None
+        self.assertIsNone(cap.tamanho)
+        self.assertIsNone(cap.imagem(20, 40))
+
+    def test_video_que_falhou_e_tentado_de_novo(self):
+        cap = self._cap()
+        cap.modo = "video"
+        self.assertFalse(cap._hora_de_tentar_video())  # nunca falhou
+        cap.video_ok, cap.falhas_video, cap.t_falha_video = False, 1, E.time.time()
+        self.assertFalse(cap._hora_de_tentar_video())  # acabou de falhar
+        cap.t_falha_video -= 31
+        self.assertTrue(cap._hora_de_tentar_video())  # 30 s depois
+        esperas = []
+        for n in (1, 2, 3, 4, 9):
+            cap.falhas_video = n
+            esperas.append(cap.espera_video())
+        self.assertEqual(esperas, [30, 60, 120, 240, 300])
+        cap.modo = "quadros"  # quem escolheu quadros nao recebe video a forca
+        self.assertFalse(cap._hora_de_tentar_video())
+
+    def test_trocar_de_aparelho_zera_a_falha(self):
+        cap = self._cap()
+        cap.video_ok, cap.falhas_video = False, 3
+        cap.trocar("outro")
+        self.assertTrue(cap.video_ok)
+        self.assertEqual(cap.falhas_video, 0)
+
+
+@unittest.skipIf(E is None, "PyAV ou Pillow ausentes")
+class Dados(unittest.TestCase):
+    def test_configuracao_da_pasta_antiga_vem_junto(self):
+        with tempfile.TemporaryDirectory() as base:
+            os.makedirs(os.path.join(base, "EspelhaTela"))
+            with open(os.path.join(base, "EspelhaTela", "config.json"), "w", encoding="utf-8") as f:
+                f.write('{"adb_porta": 5037}')
+            antes = os.environ.get("APPDATA")
+            os.environ["APPDATA"] = base
+            try:
+                self.assertEqual(E.carregar_config(), {"adb_porta": 5037})  # copiada para %APPDATA%\Vision
+                self.assertTrue(os.path.isfile(os.path.join(base, "Vision", "config.json")))
+                E.salvar_config({"adb_porta": 5038})  # a partir dai so a pasta nova e usada
+                self.assertEqual(E.carregar_config(), {"adb_porta": 5038})
+            finally:
+                if antes is None:
+                    del os.environ["APPDATA"]
+                else:
+                    os.environ["APPDATA"] = antes
+
+
+import atualizacao as U  # noqa: E402
+
+
+class Atualizacao(unittest.TestCase):
+    RELEASES = [
+        {"tag_name": "v1.3", "name": "Vision 1.3", "draft": True, "assets": [{"name": "Vision-Setup-1.3.exe"}]},
+        {"tag_name": "v1.10", "name": "Vision 1.10", "body": " novidades ", "html_url": "https://x/v1.10",
+         "assets": [{"name": "Vision-1.10.zip"}, {"name": "Vision-Setup-1.10.exe", "size": 9, "url": "https://api/a/1",
+                                                    "browser_download_url": "https://dl/Vision-Setup-1.10.exe"}]},
+        {"tag_name": "v1.9", "assets": [{"name": "Vision-Setup-1.9.exe"}]},
+        {"tag_name": "v2.0", "assets": [{"name": "Vision-2.0.zip"}]},  # sem instalador: nao serve
+        {"tag_name": "outro-v9.0", "assets": [{"name": "Vision-Setup-9.0.exe"}]},  # outro utilitario do repo
+    ]
+
+    def test_versoes(self):
+        self.assertTrue(U.mais_nova("1.10", "1.9"))
+        self.assertTrue(U.mais_nova("v1.2.1", "1.2"))
+        self.assertFalse(U.mais_nova("1.2", "1.2"))
+        self.assertFalse(U.mais_nova("", "1.0"))
+
+    def test_escolhe_a_mais_nova_publicada_com_instalador(self):
+        r = U.escolhe_release(self.RELEASES, "v", "Vision-Setup-")
+        self.assertEqual((r["versao"], r["arquivo"], r["notas"]), ("1.10", "Vision-Setup-1.10.exe", "novidades"))
+        self.assertEqual(r["url_publica"], "https://dl/Vision-Setup-1.10.exe")
+        self.assertIsNone(U.escolhe_release(self.RELEASES, "vision-v", "Vision-SmartPOS-Setup-"))
+
+    def test_token_nao_segue_para_outro_servidor(self):
+        h = U.SemTokenNoRedirecionamento()
+        req = U._pedido("https://api.github.com/repos/a/b/releases/assets/1", "segredo", "application/octet-stream")
+        mesmo = h.redirect_request(req, None, 302, "Found", {}, "https://api.github.com/outro")
+        fora = h.redirect_request(req, None, 302, "Found", {}, "https://objects.githubusercontent.com/x")
+        self.assertIn("Authorization", mesmo.headers)
+        self.assertNotIn("Authorization", fora.headers)
+        self.assertNotIn("Authorization", fora.unredirected_hdrs)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

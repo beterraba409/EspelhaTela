@@ -6,3 +6,4 @@ __pycache__/
 # binarios gerados (compilar.bat): publicar em Releases, nao no git
 dist/*.exe
 dist/*.zip
+dist/LICENSE.txt

@@ -1,4 +1,4 @@
-# Contribuindo com o EspelhaTela
+# Contribuindo com o Vision
 
 Obrigado pelo interesse! Bugs, ideias e PRs são bem-vindos.
 
@@ -7,7 +7,7 @@ Obrigado pelo interesse! Bugs, ideias e PRs são bem-vindos.
 Abra uma [issue](../../issues/new/choose) e informe:
 - o modelo do aparelho e a versão do Android;
 - o que aparece no rodapé da janela (modo `VIDEO` ou `quadros`, `clique instantaneo` ou `via adb`, e a porta);
-- o conteúdo de `%TEMP%\espelhatela-diagnostico.txt`, gerado com `EspelhaTela.exe --diagnostico` ou `python espelha_tela.py --diagnostico`.
+- o conteúdo de `%TEMP%\vision-diagnostico.txt`, gerado com `Vision.exe --diagnostico` ou `python espelha_tela.py --diagnostico`.
 
 ## Rodar a partir do código
 

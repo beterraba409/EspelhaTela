@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.5 - atualização que fecha o app e reabre sem erro
+
+- Depois de atualizar, o Vision abria com o erro "Failed to load Python DLL": o Vision aberto pelo instalador herdava as variáveis internas do PyInstaller do Vision antigo e procurava a pasta temporária dele, que já tinha sido apagada. Agora tudo o que o Vision abre (instalador, nova sessão, reabrir) recebe um ambiente limpo, e o instalador abre o Vision pelo Explorer.
+- Antes de instalar, o Vision fecha de verdade: um ajudante espera ele sair, força a parada de qualquer janela do Vision que ainda estiver aberta e só então roda o instalador.
+
 ## 1.4 - textos naturais e revisão visual
 
 - Textos em português natural, com acentos, em todas as janelas; a lista mostra o modelo do aparelho ("0123abcd · GPOS780").

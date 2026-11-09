@@ -69,11 +69,22 @@ import seletor  # noqa: E402  (seletor de identificador para o Maestro)
 import visual  # noqa: E402  (botoes, icones do Windows, barra lateral e rodape)
 import atualizacao  # noqa: E402  (busca de versoes novas no GitHub)
 
-VERSAO = "1.4"
+VERSAO = "1.5"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
 SEM_JANELA = 0x08000000 if os.name == "nt" else 0
+
+
+def ambiente_limpo():
+    """Ambiente para abrir outro programa a partir do Vision empacotado (PyInstaller, arquivo unico).
+
+    Sem isso, um Vision aberto daqui herda as variaveis internas do PyInstaller, tenta usar a pasta
+    temporaria deste processo e, quando ela some (este Vision fechou), falha com "Failed to load Python DLL".
+    """
+    amb = {k: v for k, v in os.environ.items() if not (k.startswith("_PYI_") or k.startswith("_MEI"))}
+    amb["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return amb
 
 
 def caminho_recurso(nome):
@@ -2878,7 +2889,7 @@ class App:
         """Outra instancia do Vision já com o aparelho escolhido (mesmo adb e mesma porta)."""
         cmd = self._comando_vision()
         try:
-            subprocess.Popen(cmd + ["--serial", serial, "--adb", self.cap.adb], close_fds=True)
+            subprocess.Popen(cmd + ["--serial", serial, "--adb", self.cap.adb], close_fds=True, env=ambiente_limpo())
             self.aviso_rapido("abrindo %s em nova sessão..." % serial, 4)
         except Exception as e:  # noqa: BLE001
             self.aviso_rapido("não foi possível abrir nova sessão: %s" % str(e)[:80], 6)
@@ -2952,7 +2963,7 @@ class App:
         if self.cap.serial:
             args += ["--serial", self.cap.serial]
         try:
-            subprocess.Popen(self._comando_vision() + args, close_fds=True)
+            subprocess.Popen(self._comando_vision() + args, close_fds=True, env=ambiente_limpo())
         except Exception as e:  # noqa: BLE001
             return messagebox.showerror("Vision", "N\u00e3o foi poss\u00edvel reabrir: %s\nFeche e abra o Vision para aplicar." % e, parent=self.root)
         self.fechar()
@@ -3025,7 +3036,7 @@ class App:
             if messagebox.askyesno("Vision", "Vision %s dispon\u00edvel. Abrir a p\u00e1gina da vers\u00e3o?" % info["versao"], parent=self.root):
                 webbrowser.open(info["pagina"])
             return
-        pergunta = "Vision %s dispon\u00edvel (voc\u00ea tem a %s).\n\n%s\n\nBaixar e instalar agora? O Vision fecha e abre de novo sozinho no fim." % (info["versao"], VERSAO, notas)
+        pergunta = "Vision %s dispon\u00edvel (voc\u00ea tem a %s).\n\n%s\n\nBaixar e instalar agora? Todas as janelas do Vision ser\u00e3o fechadas, e ele abre de novo sozinho no fim." % (info["versao"], VERSAO, notas)
         if not messagebox.askyesno("Atualizar o Vision", pergunta, parent=self.root):
             return
         destino = os.path.join(tempfile.gettempdir(), info["arquivo"])
@@ -3048,9 +3059,9 @@ class App:
         self.ocupado = ""
         if erro:
             return messagebox.showerror("Vision", "O download da atualiza\u00e7\u00e3o falhou: %s" % erro, parent=self.root)
-        try:  # o instalador roda sozinho, fecha esta janela se preciso e abre o Vision novo no fim
-            subprocess.Popen([destino, "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS"], close_fds=True,
-                             creationflags=0x00000008 | 0x00000200)  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        try:
+            subprocess.Popen(comando_de_instalacao(destino, sys.executable, [os.getpid(), os.getppid()]), close_fds=True,
+                             env=ambiente_limpo(), creationflags=SEM_JANELA | 0x00000200)  # sem janela, grupo proprio
         except Exception as e:  # noqa: BLE001
             return messagebox.showerror("Vision", "N\u00e3o foi poss\u00edvel abrir o instalador: %s" % e, parent=self.root)
         self.fechar()
@@ -3149,6 +3160,23 @@ class App:
             self.rodape.mensagem(txt, cor)
         self.root.title("Vision - %s%s" % (cap.serial or "sem aparelho", " (pausado)" if self.pausado else ""))
         self.root.after(400, self.rodape_tick)
+
+
+def comando_de_instalacao(instalador, exe_app, pids, espera=20):
+    """PowerShell que roda depois que este Vision fecha: espera os processos dele, forca a parada de
+    qualquer Vision aberto da mesma pasta (outras sessoes ou um que travou) e entao roda o instalador.
+    O instalador precisa do Vision parado para trocar o Vision.exe."""
+    def aspas(t):
+        return "'" + str(t).replace("'", "''") + "'"
+    ids = ",".join(str(int(x)) for x in pids if x)
+    script = "; ".join([
+        "$ErrorActionPreference = 'SilentlyContinue'",
+        "Wait-Process -Id %s -Timeout %d" % (ids, espera),
+        "Get-Process | Where-Object { $_.Path -eq %s } | Stop-Process -Force" % aspas(exe_app),
+        "Start-Sleep -Milliseconds 800",
+        "Start-Process -FilePath %s -ArgumentList '/SILENT','/SUPPRESSMSGBOXES','/NORESTART'" % aspas(instalador),
+    ])
+    return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", script]
 
 
 def aplica_adb_lembrado(informado, cfg):

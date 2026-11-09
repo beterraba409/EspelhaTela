@@ -46,4 +46,6 @@ Name: "{autoprograms}\Vision"; Filename: "{app}\Vision.exe"
 Name: "{autodesktop}\Vision"; Filename: "{app}\Vision.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\Vision.exe"; Description: "{cm:LaunchProgram,Vision}"; Flags: nowait postinstall
+; pelo Explorer: o Vision abre com o ambiente limpo do Windows, mesmo quando o instalador
+; foi aberto por um Vision antigo (que passava adiante as variaveis internas do PyInstaller)
+Filename: "{win}\explorer.exe"; Parameters: """{app}\Vision.exe"""; Description: "{cm:LaunchProgram,Vision}"; Flags: nowait postinstall

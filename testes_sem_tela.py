@@ -308,5 +308,30 @@ class Atualizacao(unittest.TestCase):
         self.assertNotIn("Authorization", fora.unredirected_hdrs)
 
 
+@unittest.skipIf(E is None, "PyAV ou Pillow ausentes")
+class OutroProcesso(unittest.TestCase):
+    def test_ambiente_limpo_tira_as_variaveis_do_pyinstaller(self):
+        antes = dict(os.environ)
+        os.environ.update({"_PYI_APPLICATION_HOME_DIR": "C:/sumiu", "_MEIPASS2": "C:/sumiu", "PATH_TESTE": "fica"})
+        try:
+            amb = E.ambiente_limpo()
+        finally:
+            os.environ.clear()
+            os.environ.update(antes)
+        self.assertNotIn("_PYI_APPLICATION_HOME_DIR", amb)
+        self.assertNotIn("_MEIPASS2", amb)
+        self.assertEqual(amb["PATH_TESTE"], "fica")
+        self.assertEqual(amb["PYINSTALLER_RESET_ENVIRONMENT"], "1")
+
+    def test_ajudante_espera_para_e_so_depois_instala(self):
+        cmd = E.comando_de_instalacao("C:/Temp/Vision-Setup-9.9.exe", "C:/Program Files/O'Vision/Vision.exe", [10, 20, 0])
+        self.assertEqual(cmd[0], "powershell.exe")
+        script = cmd[-1]
+        espera, para, instala = script.index("Wait-Process -Id 10,20"), script.index("Stop-Process -Force"), script.index("Start-Process")
+        self.assertTrue(espera < para < instala)  # nesta ordem
+        self.assertIn("'C:/Program Files/O''Vision/Vision.exe'", script)  # aspas simples escapadas
+        self.assertIn("'/SILENT','/SUPPRESSMSGBOXES','/NORESTART'", script)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

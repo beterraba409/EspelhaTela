@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.4 - textos naturais e revisão visual
+
+- Textos em português natural, com acentos, em todas as janelas; a lista mostra o modelo do aparelho ("0123abcd · GPOS780").
+- Letras sem contorno, mais limpas; a versão do Vision fica no canto do rodapé.
+- Rodapé com etiquetas curtas que nunca saem cortadas: as do fim somem inteiras quando falta espaço.
+- Revisão visual nos temas claro e escuro: tabelas, botões, caixas, campos, molduras e barras de rolagem seguem o tema (antes a tabela de Arquivos ficava branca no escuro e o cabeçalho de Memória ficava ilegível no claro); cores de destaque legíveis nos dois temas.
+
 ## 1.3 - primeira atualização pelo próprio app
 
 - Versão para quem tem a 1.2 atualizar pelo botão **Buscar atualizações**, com o ícone novo e os últimos ajustes de visual.

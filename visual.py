@@ -189,7 +189,7 @@ class Botao(tk.Canvas):
         tam_ic = 12 if f["icones"] else 11
         if self.texto:
             self.create_text(17, h / 2, text=car, font=(fonte_ic, tam_ic), fill=cor_ic, anchor="center")
-            texto_com_contorno(self, 34, h / 2, self.texto, (f["forte"], 10), cor)
+            self.create_text(34, h / 2, text=self.texto, font=(f["forte"], 10), fill=cor, anchor="w")
         else:
             self.create_text(w / 2, h / 2, text=car, font=(fonte_ic, tam_ic), fill=cor_ic, anchor="center")
 
@@ -218,11 +218,11 @@ class Rolavel(tk.Frame):
 
 
 def titulo_secao(pai, texto):
-    """Titulo de secao: barra de destaque a esquerda e texto maior, com contorno."""
+    """Titulo de secao: barra de destaque a esquerda e texto maior."""
     c = tk.Canvas(pai, height=28, bg=BG, highlightthickness=0, bd=0)
     c.pack(fill="x", pady=(12, 4))
     c.create_rectangle(2, 7, 5, 22, fill=ACENTO, outline="")
-    texto_com_contorno(c, 13, 15, texto, (fontes(pai)["forte"], 11, "bold"), FG)
+    c.create_text(13, 15, text=texto, font=(fontes(pai)["forte"], 11), fill=FG, anchor="w")
 
 
 def linha_de_icones(pai, itens, largura_total, altura=36, espaco=5):
@@ -242,12 +242,16 @@ def linha_de_icones(pai, itens, largura_total, altura=36, espaco=5):
 class Rodape(tk.Frame):
     """Rodape: uma mensagem (avisos, dicas, erros) ou, sem mensagem, etiquetas de estado."""
 
-    def __init__(self, pai):
+    def __init__(self, pai, versao=""):
         super().__init__(pai, bg=BG)
         tk.Frame(self, bg=BORDA, height=1).pack(fill="x")
         self.corpo = tk.Frame(self, bg=BG)
         self.corpo.pack(fill="x", padx=8, pady=6)
         f = fontes(pai)["texto"]
+        self.versao = None
+        if versao:  # fica sempre a direita, com mensagem ou com etiquetas
+            self.versao = tk.Label(self.corpo, text=versao, bg=BG, fg=FG2, font=(f, 8))
+            self.versao.pack(side="right", padx=(8, 0))
         self.msg = tk.Label(self.corpo, bg=BG, fg=FG2, anchor="w", font=(f, 9))
         self.etiquetas = []
         self._fonte = f
@@ -258,7 +262,7 @@ class Rodape(tk.Frame):
             for e in self.etiquetas:
                 e.pack_forget()
             self._n = None
-            self.msg.pack(fill="x")
+            self.msg.pack(side="left", fill="x", expand=True)
             self._modo = "msg"
         self.msg.configure(text=texto, fg=cor)
 
@@ -270,11 +274,71 @@ class Rodape(tk.Frame):
         while len(self.etiquetas) < len(itens):
             self.etiquetas.append(tk.Label(self.corpo, bg=BG2, fg=FG, font=(self._fonte, 8), padx=8, pady=2,
                                            highlightthickness=1, highlightbackground=BORDA))
-        if getattr(self, "_n", None) != len(itens):  # mudou a quantidade: reempacota na ordem certa
-            for e in self.etiquetas:
-                e.pack_forget()
-            for e in self.etiquetas[:len(itens)]:
-                e.pack(side="left", padx=(0, 6))
-            self._n = len(itens)
         for e, (texto, cor) in zip(self.etiquetas, itens):
             e.configure(text=("● " + texto) if cor else texto, fg=cor or FG)
+        # quantas cabem na largura (a versao fica a direita): as do fim saem inteiras, nunca cortadas
+        livre = self.corpo.winfo_width() - (self.versao.winfo_reqwidth() + 12 if self.versao else 0)
+        n, usado = 0, 0
+        for e in self.etiquetas[:len(itens)]:
+            usado += e.winfo_reqwidth() + 6
+            if usado > livre and n > 0:
+                break
+            n += 1
+        if getattr(self, "_n", None) != n:
+            for e in self.etiquetas:
+                e.pack_forget()
+            for e in self.etiquetas[:n]:
+                e.pack(side="left", padx=(0, 6))
+            self._n = n
+
+
+def estilo_ttk(raiz):
+    """Estilo unico das pecas ttk (botoes, caixas, campos, tabelas, molduras, rolagem) no tema atual."""
+    from tkinter import ttk
+    e = ttk.Style(raiz)
+    try:
+        e.theme_use("clam")
+    except tk.TclError:
+        pass
+    f = fontes(raiz)
+    sel_fg = "#ffffff"
+    e.configure(".", background=BG, foreground=FG, fieldbackground=BG2, bordercolor=BORDA, lightcolor=BG2,
+                darkcolor=BG2, troughcolor=BG, focuscolor=ACENTO, selectbackground=ACENTO, selectforeground=sel_fg,
+                insertcolor=FG, font=(f["texto"], 9))
+    e.configure("TButton", background=BG2, foreground=FG, bordercolor=BORDA, lightcolor=BG2, darkcolor=BG2,
+                padding=(10, 5), relief="flat", focusthickness=0)
+    e.map("TButton", background=[("disabled", BG2), ("pressed", PRESSIONADO), ("active", HOVER)],
+          foreground=[("disabled", DESATIVADO)], bordercolor=[("active", BORDA_HOVER)],
+          lightcolor=[("active", HOVER)], darkcolor=[("active", HOVER)])
+    for tipo in ("TCheckbutton", "TRadiobutton"):
+        e.configure(tipo, background=BG, foreground=FG, indicatorbackground=BG2, indicatorforeground=FG,
+                    indicatorrelief="flat", focusthickness=0)
+        e.map(tipo, background=[("active", BG)], foreground=[("disabled", DESATIVADO)],
+              indicatorbackground=[("selected", ACENTO), ("active", HOVER)], indicatorforeground=[("selected", sel_fg)])
+    e.configure("TEntry", fieldbackground=BG2, foreground=FG, bordercolor=BORDA, lightcolor=BG2, darkcolor=BG2,
+                insertcolor=FG, padding=4)
+    e.map("TEntry", bordercolor=[("focus", ACENTO)])
+    e.configure("TCombobox", fieldbackground=BG2, background=BG2, foreground=FG, arrowcolor=FG, bordercolor=BORDA,
+                lightcolor=BG2, darkcolor=BG2, padding=(6, 4), arrowsize=13)
+    e.map("TCombobox", fieldbackground=[("readonly", BG2)], foreground=[("readonly", FG)],
+          selectbackground=[("readonly", BG2)], selectforeground=[("readonly", FG)], background=[("readonly", BG2)],
+          bordercolor=[("focus", ACENTO)])
+    e.configure("Treeview", background=BG2, fieldbackground=BG2, foreground=FG, rowheight=22, borderwidth=0,
+                bordercolor=BORDA, lightcolor=BG2, darkcolor=BG2)
+    e.map("Treeview", background=[("selected", ACENTO)], foreground=[("selected", sel_fg)])
+    e.configure("Treeview.Heading", background=BG, foreground=FG2, relief="flat", bordercolor=BORDA, lightcolor=BG,
+                darkcolor=BG, padding=(6, 4), font=(f["forte"], 9))
+    e.map("Treeview.Heading", background=[("active", HOVER)], foreground=[("active", FG)])
+    e.configure("TLabelframe", background=BG, bordercolor=BORDA, lightcolor=BG, darkcolor=BG)
+    e.configure("TLabelframe.Label", background=BG, foreground=FG2)
+    e.configure("TLabel", background=BG, foreground=FG)
+    e.configure("TFrame", background=BG)
+    for orient in ("Vertical", "Horizontal"):
+        e.configure("%s.TScrollbar" % orient, background=BG2, troughcolor=BG, bordercolor=BG, arrowcolor=FG2,
+                    lightcolor=BG2, darkcolor=BG2, gripcount=0)
+        e.map("%s.TScrollbar" % orient, background=[("active", HOVER)])
+    raiz.option_add("*TCombobox*Listbox.background", BG2)
+    raiz.option_add("*TCombobox*Listbox.foreground", FG)
+    raiz.option_add("*TCombobox*Listbox.selectBackground", ACENTO)
+    raiz.option_add("*TCombobox*Listbox.selectForeground", sel_fg)
+    return e

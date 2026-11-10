@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.7 - diagnóstico do vídeo pelo lado do aparelho
+
+- **Resposta ao toque medida certo**: o registro conta o tempo entre o toque e o primeiro quadro depois dele (antes contava desde o último quadro, e uma tela parada por 30 s virava uma "pausa de 30 s"). Toque sem mudança na tela por mais de 5 s aparece à parte, não como travada.
+- **Dados do aparelho no registro**: os codificadores H.264 que ele tem (e se o usado é de hardware ou de software) e, a cada 10 s de uso, quantos quadros o próprio app desenhou e quanto processador o screenrecord, o desenho da tela e o app usam.
+- **Vídeo leve (aparelho fraco)**: 480 px a 2 Mbps, menos trabalho para o codificador de POS fracos.
+
 ## 1.6 - versão antes de instalar e vídeo sem travadas
 
 - **Instalar APK** pede confirmação mostrando o aparelho, o pacote, a versão do APK e a que já está no aparelho, e diz se é instalação nova, atualização, mesma versão ou downgrade (o downgrade já instala com `-d`). A versão é lida direto do APK, sem precisar do Android SDK no PC.

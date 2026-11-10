@@ -380,7 +380,7 @@ class DiagnosticoVideo(unittest.TestCase):
         r.toque()
         self.t[0] += 0.8  # 0,8 s sem quadro logo depois do toque, sem video esperando no PC
         r.quadro(2, fila_bytes=0)
-        self.assertIn("PAUSA de 0.8 s", self._texto())
+        self.assertIn("RESPOSTA LENTA: 0.8 s", self._texto())
         self.assertIn("aparelho", self._texto())
 
     def test_pausa_com_video_acumulado_e_do_pc(self):
@@ -408,6 +408,61 @@ class DiagnosticoVideo(unittest.TestCase):
         r.periodico()
         self.assertIn("resumo", self._texto())
         self.assertIn("30 quadros", self._texto())
+
+
+class DiagnosticoAparelho(unittest.TestCase):
+    def _registro(self):
+        self.t = [1000.0]
+        self.arq = os.path.join(tempfile.mkdtemp(), "video.log")
+        return DV.RegistroVideo(self.arq, relogio=lambda: self.t[0])
+
+    def _texto(self):
+        return open(self.arq, encoding="utf-8").read() if os.path.isfile(self.arq) else ""
+
+    def test_tela_parada_e_depois_toque_mede_so_a_resposta(self):
+        r = self._registro()
+        r.quadro(2)
+        self.t[0] += 30  # 30 s de tela parada (normal)
+        r.toque()
+        self.t[0] += 0.5  # o aparelho respondeu em 0,5 s
+        r.quadro(2)
+        self.assertIn("RESPOSTA LENTA: 0.5 s", self._texto())
+        self.assertNotIn("30.", self._texto())
+
+    def test_toque_sem_mudanca_na_tela_nao_e_travada(self):
+        r = self._registro()
+        r.quadro(2)
+        r.toque()
+        self.t[0] += 8
+        r.quadro(2)
+        self.assertIn("toque sem mudanca", self._texto())
+        self.assertNotIn("RESPOSTA LENTA", self._texto())
+
+    def test_uso_recente(self):
+        r = self._registro()
+        self.assertFalse(r.teve_uso())
+        r.toque()
+        self.assertTrue(r.teve_uso())
+        self.t[0] += 20
+        self.assertFalse(r.teve_uso())
+
+    def test_amostra_do_aparelho(self):
+        saida = ("##pkg com.smartposv2.linxtef\nTotal frames rendered: 240\nJanky frames: 30 (12.50%)\n##top\n"
+                 "12.5 surfaceflinger\n 9.3 com.smartposv2.linxtef\n 3.1 screenrecord --output-format=h264 -\n"
+                 " 0.0 grep -E screenrecord|surfaceflinger|com.smartposv2.linxtef\n"
+                 " 5.0 sh -c screenrecord '--output-format=h264'\n")
+        pkg, quadros, cpu = DV.le_amostra(saida)
+        self.assertEqual(pkg, "com.smartposv2.linxtef")
+        self.assertEqual(quadros, (240, 30))
+        self.assertEqual(cpu, {"surfaceflinger": 12.5, "com.smartposv2.linxtef": 9.3, "screenrecord": 3.1})  # sem o grep e o sh
+
+    def test_codificadores(self):
+        xml = ('<MediaCodecs><Encoders>'
+               '<MediaCodec name="OMX.qcom.video.encoder.avc" type="video/avc"><Limit name="size"/></MediaCodec>'
+               '<MediaCodec name="c2.android.avc.encoder"><Type name="video/avc"/></MediaCodec>'
+               '<MediaCodec name="OMX.qcom.video.encoder.hevc" type="video/hevc"/>'
+               '</Encoders><Decoders><MediaCodec name="OMX.qcom.video.decoder.avc" type="video/avc"/></Decoders></MediaCodecs>')
+        self.assertEqual(DV.codificadores_h264(xml), [("OMX.qcom.video.encoder.avc", False), ("c2.android.avc.encoder", True)])
 
 
 if __name__ == "__main__":

@@ -128,7 +128,7 @@ Confira se a depuração USB está ligada e se você aceitou "Permitir depuraç�
 <details>
 <summary><b>O vídeo trava de vez em quando.</b></summary>
 
-Use o vídeo por um tempo e, quando travar, clique em **Registro do vídeo** (seção Vision). Ele abre o `video.log`, que diz se a travada veio do aparelho (parou de mandar quadros), do PC (o vídeo chegou mas ficou esperando) ou da troca de gravação. Abra uma issue com esse arquivo.
+Use o vídeo por um tempo e, quando travar, clique em **Registro do vídeo** (seção Vision). Ele abre o `video.log`, que diz se a travada veio do aparelho (parou de mandar quadros), do PC (o vídeo chegou mas ficou esperando) ou da troca de gravação, e mostra o codificador de vídeo do aparelho, o processador e quantos quadros o próprio app desenhou. Se a causa for o aparelho, experimente o modo **Vídeo leve (aparelho fraco)**. Abra uma issue com esse arquivo.
 </details>
 
 <details>

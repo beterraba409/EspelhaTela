@@ -71,7 +71,7 @@ import atualizacao  # noqa: E402  (busca de versoes novas no GitHub)
 import apk  # noqa: E402  (pacote e versao de um APK, sem o Android SDK)
 import diagnostico_video  # noqa: E402  (registro das travadas do video)
 
-VERSAO = "1.6"
+VERSAO = "1.7"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -217,6 +217,7 @@ MODOS_CAPTURA = {
     "V\u00eddeo r\u00e1pido": ("video", "rapido"),
     "V\u00eddeo equilibrado": ("video", "equilibrado"),
     "V\u00eddeo n\u00edtido": ("video", "nitido"),
+    "V\u00eddeo leve (aparelho fraco)": ("video", "leve"),
     "Quadros (leve)": ("quadros", "rapido"),
 }
 NOMES_ANTIGOS_CAPTURA = {"Video - Rápido": "V\u00eddeo r\u00e1pido", "Video - Equilibrado": "V\u00eddeo equilibrado",
@@ -225,6 +226,7 @@ PERFIS_VIDEO = {  # lado maior em pixels (0 = nativo) e taxa de bits
     "rapido": (640, "4M"),  # 4 Mbps: telas que mudam inteiras (transicoes, veus) nao borram nem engasgam
     "equilibrado": (960, "4M"),
     "nitido": (0, "8M"),
+    "leve": (480, "2M"),  # menos pixels para o codificador do aparelho: mais quadros em POS fraco
 }
 
 
@@ -386,6 +388,7 @@ class Captura(threading.Thread):
         self.diag = diagnostico_video.RegistroVideo(os.path.join(pasta_dados(), "video.log"))
         self._fluxo_ativo = None  # a gravacao cujos quadros vao para a tela
         self._sem_sobreposicao = set()  # aparelhos que nao aceitam duas gravacoes ao mesmo tempo
+        self._codificadores_lidos = set()  # aparelhos cujo codificador de video ja foi registrado
         self.t_falha_video = 0.0
         self.via = "quadros"
         self.nota = ""
@@ -563,6 +566,52 @@ class Captura(threading.Thread):
         threading.Thread(target=drena_erro, daemon=True).start()
         return f
 
+    def _registra_codificador(self, serial):
+        """Qual codificador H.264 o aparelho tem: o de software pesa no processador e limita os quadros."""
+        try:
+            _, xml, _ = rodar([self.adb, "-s", serial, "shell", diagnostico_video.COMANDO_CODIFICADORES], timeout=20)
+        except Exception:  # noqa: BLE001
+            return
+        cods = diagnostico_video.codificadores_h264(xml)
+        if not cods:
+            return self.diag.aparelho("n\u00e3o consegui ler a lista de codificadores de v\u00eddeo")
+        lista = ", ".join("%s (%s)" % (n, "software" if sw else "hardware") for n, sw in cods)
+        nome, sw = cods[0]
+        if sw:
+            conclusao = "ATEN\u00c7\u00c3O: o primeiro \u00e9 de software, que pesa no processador e limita os quadros"
+        else:
+            conclusao = "o screenrecord usa o primeiro, %s, de hardware" % nome
+        self.diag.aparelho("codificadores H.264: %s. %s" % (lista, conclusao))
+
+    def _amostra_aparelho_loop(self):
+        """A cada ~10 s de uso: quadros que o proprio app desenhou e processador do aparelho."""
+        ultimo_pkg, t_ultimo = None, 0.0
+        while not self.parar:
+            for _ in range(100):
+                if self.parar:
+                    return
+                time.sleep(0.1)
+            serial = self.serial
+            if self.via != "video" or not serial or not self.diag.teve_uso():
+                ultimo_pkg = None
+                continue
+            try:
+                _, out, _ = rodar([self.adb, "-s", serial, "shell", diagnostico_video.COMANDO_AMOSTRA], timeout=15)
+            except Exception:  # noqa: BLE001
+                continue
+            agora = time.time()
+            pkg, (quadros, atraso), cpu = diagnostico_video.le_amostra(out)
+            partes = ["app %s" % (pkg or "?")]
+            if quadros is not None and pkg and pkg == ultimo_pkg and agora > t_ultimo:
+                dur = agora - t_ultimo
+                partes.append("o app desenhou %d quadros em %.0f s (%.1f fps), %d com atraso" % (quadros, dur, quadros / dur, atraso))
+            ultimo_pkg, t_ultimo = pkg, agora  # a primeira leitura de um app traz o total acumulado: so zera
+            if cpu:
+                partes.append("processador: " + ", ".join("%s %.0f%%" % (k, v) for k, v in sorted(cpu.items(), key=lambda x: -x[1])))
+            else:
+                partes.append("processador: não disponível neste aparelho")
+            self.diag.aparelho(" | ".join(partes))
+
     @staticmethod
     def _fecha_fluxo(f):
         if f is None:
@@ -582,6 +631,9 @@ class Captura(threading.Thread):
         self._fluxo_ativo = atual
         proximo = None
         self.diag.evento("gravacao iniciada: %s, %s, %s" % (serial, size or "tamanho nativo", taxa))
+        if serial not in self._codificadores_lidos:
+            self._codificadores_lidos.add(serial)
+            threading.Thread(target=self._registra_codificador, args=(serial,), daemon=True).start()
         self.via = "video"
         motivo, teve_quadro = "fim", False
         while True:
@@ -688,6 +740,7 @@ class Captura(threading.Thread):
 
     def run(self):
         threading.Thread(target=self._lista_loop, daemon=True).start()
+        threading.Thread(target=self._amostra_aparelho_loop, daemon=True).start()
         while not self.parar:
             if not self.ativo:
                 time.sleep(0.2)

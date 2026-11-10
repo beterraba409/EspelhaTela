@@ -154,6 +154,24 @@ _SOFTWARE = ("OMX.google.", "c2.android.", "OMX.SEC.avc.sw", "c2.google.")
 # codificadores declarados pelo Android (lido uma vez por aparelho)
 COMANDO_CODIFICADORES = "cat /vendor/etc/media_codecs*.xml /odm/etc/media_codecs*.xml /system/etc/media_codecs*.xml 2>/dev/null"
 
+# codificador que a gravacao atual abriu: o proprio screenrecord anota no logcat (MediaCodec "init name(...)",
+# "Component Allocated (...)" ou Codec2 "Created component [...]"). Le sem limpar o logcat de ninguem.
+COMANDO_CODIFICADOR_EM_USO = (
+    r'''p=$(pidof screenrecord | awk '{print $NF}'); '''
+    r'''[ -n "$p" ] && logcat -d --pid=$p 2>/dev/null | grep -E 'init name\(|Component Allocated|Created component' | tail -5'''
+)
+
+
+def codificador_em_uso(saida, conhecidos):
+    """Nome do codificador que aparece por ultimo no logcat do screenrecord (entre os conhecidos), ou None."""
+    achado = None
+    for linha in (saida or "").splitlines():
+        for nome in re.findall(r"[\(\[]([A-Za-z0-9_.]+)[\)\]]", linha):
+            if nome in conhecidos:
+                achado = nome
+    return achado
+
+
 # uma amostra a cada 10 s de uso: app em primeiro plano (a janela em foco ou, se ela nao for de app, o app
 # em primeiro plano), quadros que ele desenhou desde a amostra anterior
 # (o reset zera a contagem) e o processador do screenrecord, do surfaceflinger (desenho da tela) e do app

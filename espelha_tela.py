@@ -71,7 +71,7 @@ import atualizacao  # noqa: E402  (busca de versoes novas no GitHub)
 import apk  # noqa: E402  (pacote e versao de um APK, sem o Android SDK)
 import diagnostico_video  # noqa: E402  (registro das travadas do video)
 
-VERSAO = "1.7"
+VERSAO = "1.8"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -567,7 +567,8 @@ class Captura(threading.Thread):
         return f
 
     def _registra_codificador(self, serial):
-        """Qual codificador H.264 o aparelho tem: o de software pesa no processador e limita os quadros."""
+        """Quais codificadores H.264 o aparelho tem e qual a gravacao abriu de fato (o de software pesa no
+        processador). A ordem nos arquivos do Android nao e a ordem em que ele escolhe: o que vale e o logcat."""
         try:
             _, xml, _ = rodar([self.adb, "-s", serial, "shell", diagnostico_video.COMANDO_CODIFICADORES], timeout=20)
         except Exception:  # noqa: BLE001
@@ -575,12 +576,21 @@ class Captura(threading.Thread):
         cods = diagnostico_video.codificadores_h264(xml)
         if not cods:
             return self.diag.aparelho("n\u00e3o consegui ler a lista de codificadores de v\u00eddeo")
+        tipo = dict(cods)
         lista = ", ".join("%s (%s)" % (n, "software" if sw else "hardware") for n, sw in cods)
-        nome, sw = cods[0]
-        if sw:
-            conclusao = "ATEN\u00c7\u00c3O: o primeiro \u00e9 de software, que pesa no processador e limita os quadros"
+        time.sleep(3)  # a gravacao ja abriu o codificador e anotou no logcat
+        try:
+            _, out, _ = rodar([self.adb, "-s", serial, "shell", diagnostico_video.COMANDO_CODIFICADOR_EM_USO], timeout=20)
+        except Exception:  # noqa: BLE001
+            out = ""
+        usado = diagnostico_video.codificador_em_uso(out, tipo)
+        if usado is None:
+            conclusao = ("n\u00e3o deu para ver qual est\u00e1 em uso (o logcat deste aparelho n\u00e3o mostra); "
+                         "se o screenrecord usar pouco processador nas amostras, \u00e9 o de hardware")
+        elif tipo[usado]:
+            conclusao = "em uso: %s, de SOFTWARE (pesa no processador e limita os quadros)" % usado
         else:
-            conclusao = "o screenrecord usa o primeiro, %s, de hardware" % nome
+            conclusao = "em uso: %s, de hardware" % usado
         self.diag.aparelho("codificadores H.264: %s. %s" % (lista, conclusao))
 
     def _amostra_aparelho_loop(self):

@@ -465,5 +465,22 @@ class DiagnosticoAparelho(unittest.TestCase):
         self.assertEqual(DV.codificadores_h264(xml), [("OMX.qcom.video.encoder.avc", False), ("c2.android.avc.encoder", True)])
 
 
+class CodificadorEmUso(unittest.TestCase):
+    CONHECIDOS = {"c2.android.avc.encoder": True, "OMX.MTK.VIDEO.ENCODER.AVC": False}
+
+    def test_le_o_codificador_do_logcat(self):
+        saida = ("11-10 16:02:11.909 20198 20198 I MediaCodec: (0xaf1c9000) init name(OMX.MTK.VIDEO.ENCODER.AVC)\n"
+                 "11-10 16:02:12.226 20198 20200 I MediaCodec: (0xaf1c9000) Component Allocated (OMX.MTK.VIDEO.ENCODER.AVC)\n")
+        self.assertEqual(DV.codificador_em_uso(saida, self.CONHECIDOS), "OMX.MTK.VIDEO.ENCODER.AVC")
+
+    def test_codec2(self):
+        saida = "I CCodec  : Created component [c2.android.avc.encoder]\n"
+        self.assertEqual(DV.codificador_em_uso(saida, self.CONHECIDOS), "c2.android.avc.encoder")
+
+    def test_logcat_restrito(self):
+        self.assertIsNone(DV.codificador_em_uso("", self.CONHECIDOS))
+        self.assertIsNone(DV.codificador_em_uso("I MediaCodec: init name(outro.codec)", self.CONHECIDOS))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

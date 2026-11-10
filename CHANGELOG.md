@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.8 - codificador de vídeo em uso, de verdade
+
+- O registro do vídeo dizia qual codificador estava em uso pela ordem dos arquivos do Android, que não é a ordem em que ele escolhe: no L400 isso deu um aviso falso de "codificador de software". Agora ele lê no logcat o codificador que a gravação abriu de fato (sem limpar o logcat). Em aparelho que restringe o logcat, o registro diz que não deu para ver, em vez de chutar.
+
 ## 1.7 - diagnóstico do vídeo pelo lado do aparelho
 
 - **Resposta ao toque medida certo**: o registro conta o tempo entre o toque e o primeiro quadro depois dele (antes contava desde o último quadro, e uma tela parada por 30 s virava uma "pausa de 30 s"). Toque sem mudança na tela por mais de 5 s aparece à parte, não como travada.

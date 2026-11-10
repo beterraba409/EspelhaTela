@@ -126,6 +126,12 @@ Confira se a depuração USB está ligada e se você aceitou "Permitir depuraç�
 </details>
 
 <details>
+<summary><b>O vídeo trava de vez em quando.</b></summary>
+
+Use o vídeo por um tempo e, quando travar, clique em **Registro do vídeo** (seção Vision). Ele abre o `video.log`, que diz se a travada veio do aparelho (parou de mandar quadros), do PC (o vídeo chegou mas ficou esperando) ou da troca de gravação. Abra uma issue com esse arquivo.
+</details>
+
+<details>
 <summary><b>O clique está lento ("clique via adb").</b></summary>
 
 O firmware do aparelho bloqueou o injetor, e a ferramenta caiu para o `adb shell input`, que é mais lento mas funciona em qualquer aparelho.
@@ -146,7 +152,7 @@ Pode olhar à vontade: em rodadas longas, prefira o modo **Quadros (leve)**. Lem
 ## 📌 Limites conhecidos
 
 - Texto com acentos não passa digitando pelo teclado do PC. Para isso, copie no PC e cole com `Ctrl+V`.
-- O vídeo reinicia a cada 180 s (limite do `screenrecord`), com uma pausa de cerca de 1 s.
+- O `screenrecord` grava no máximo 180 s seguidos. O Vision abre a gravação seguinte antes do fim e troca sem pausa; num aparelho que não aceita duas gravações ao mesmo tempo, fica uma pausa de cerca de 1 s a cada 3 minutos.
 - Depois de girar a tela, pode ser preciso trocar o modo de captura e voltar.
 - Alguns firmwares restringem o logcat ao shell. Nesse caso a exportação avisa em vez de gerar um arquivo vazio.
 

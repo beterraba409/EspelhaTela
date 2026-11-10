@@ -333,5 +333,82 @@ class OutroProcesso(unittest.TestCase):
         self.assertIn("'/SILENT','/SUPPRESSMSGBOXES','/NORESTART'", script)
 
 
+import apk as K  # noqa: E402
+
+APK_REAL = r"C:\codigos_fontes\automacao-maestro\scripts\apks\Getnet P2-A7\getnet-linx-postos-smartpos.1.17.0.2026-09-21_17-40.apk"
+
+
+class Apk(unittest.TestCase):
+    def test_versao_no_aparelho(self):
+        saida = "    versionCode=11701000 minSdk=24 targetSdk=34\n    versionName=1.17.1\n    versionCode=1 minSdk=1\n"
+        self.assertEqual(K.versao_no_aparelho(saida), ("1.17.1", 11701000))  # a primeira e a que vale
+        self.assertEqual(K.versao_no_aparelho(""), (None, None))
+
+    def test_tipo_de_mudanca(self):
+        self.assertEqual(K.tipo_de_mudanca(47, None), "nova")
+        self.assertEqual(K.tipo_de_mudanca(47, 46), "atualizacao")
+        self.assertEqual(K.tipo_de_mudanca(47, 47), "mesma")
+        self.assertEqual(K.tipo_de_mudanca(46, 47), "downgrade")
+
+    def test_manifesto_invalido(self):
+        with self.assertRaises(ValueError):
+            K.le_manifesto(b"<manifest/>")
+
+    @unittest.skipUnless(os.path.isfile(APK_REAL), "APK de exemplo ausente nesta maquina")
+    def test_apk_real_igual_ao_aapt(self):
+        i = K.le_apk(APK_REAL)  # conferido com: aapt2 dump badging
+        self.assertEqual((i["pacote"], i["versao"], i["codigo"]), ("com.smartposv2.getnet", "1.17.0", 11700000))
+        self.assertEqual(K.le_apks([APK_REAL])["pacote"], "com.smartposv2.getnet")
+
+
+import diagnostico_video as DV  # noqa: E402
+
+
+class DiagnosticoVideo(unittest.TestCase):
+    def _registro(self):
+        self.t = [1000.0]
+        pasta = tempfile.mkdtemp()
+        self.arq = os.path.join(pasta, "video.log")
+        return DV.RegistroVideo(self.arq, relogio=lambda: self.t[0])
+
+    def _texto(self):
+        return open(self.arq, encoding="utf-8").read() if os.path.isfile(self.arq) else ""
+
+    def test_pausa_depois_de_toque_vem_do_aparelho(self):
+        r = self._registro()
+        r.quadro(2)
+        r.toque()
+        self.t[0] += 0.8  # 0,8 s sem quadro logo depois do toque, sem video esperando no PC
+        r.quadro(2, fila_bytes=0)
+        self.assertIn("PAUSA de 0.8 s", self._texto())
+        self.assertIn("aparelho", self._texto())
+
+    def test_pausa_com_video_acumulado_e_do_pc(self):
+        r = self._registro()
+        r.quadro(2)
+        r.toque()
+        self.t[0] += 0.6
+        r.quadro(80, fila_bytes=300 * 1024)
+        self.assertIn("PC: havia 300 KB", self._texto())
+
+    def test_tela_parada_sem_toque_nao_e_travada(self):
+        r = self._registro()
+        r.quadro(2)
+        self.t[0] += 5  # ninguem tocou: tela parada nao manda quadro, e isso e normal
+        r.quadro(2)
+        self.assertNotIn("PAUSA", self._texto())
+
+    def test_resumo_a_cada_10_s(self):
+        r = self._registro()
+        for _ in range(30):
+            self.t[0] += 0.05
+            r.quadro(3)
+        r.desenhou(4)
+        self.t[0] += 10
+        r.periodico()
+        self.assertIn("resumo", self._texto())
+        self.assertIn("30 quadros", self._texto())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

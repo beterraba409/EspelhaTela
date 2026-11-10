@@ -68,8 +68,10 @@ import adb_servidor  # noqa: E402  (porta do servidor adb, aviso de wrapper)
 import seletor  # noqa: E402  (seletor de identificador para o Maestro)
 import visual  # noqa: E402  (botoes, icones do Windows, barra lateral e rodape)
 import atualizacao  # noqa: E402  (busca de versoes novas no GitHub)
+import apk  # noqa: E402  (pacote e versao de um APK, sem o Android SDK)
+import diagnostico_video  # noqa: E402  (registro das travadas do video)
 
-VERSAO = "1.5"
+VERSAO = "1.6"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -220,7 +222,7 @@ MODOS_CAPTURA = {
 NOMES_ANTIGOS_CAPTURA = {"Video - Rápido": "V\u00eddeo r\u00e1pido", "Video - Equilibrado": "V\u00eddeo equilibrado",
                          "Video - Nitido": "V\u00eddeo n\u00edtido"}
 PERFIS_VIDEO = {  # lado maior em pixels (0 = nativo) e taxa de bits
-    "rapido": (640, "2M"),
+    "rapido": (640, "4M"),  # 4 Mbps: telas que mudam inteiras (transicoes, veus) nao borram nem engasgam
     "equilibrado": (960, "4M"),
     "nitido": (0, "8M"),
 }
@@ -381,6 +383,9 @@ class Captura(threading.Thread):
         self.gzip_ok = True
         self.video_ok = av is not None
         self.falhas_video = 0  # falhas seguidas do video; com falha, os quadros seguram a imagem ate a nova tentativa
+        self.diag = diagnostico_video.RegistroVideo(os.path.join(pasta_dados(), "video.log"))
+        self._fluxo_ativo = None  # a gravacao cujos quadros vao para a tela
+        self._sem_sobreposicao = set()  # aparelhos que nao aceitam duas gravacoes ao mesmo tempo
         self.t_falha_video = 0.0
         self.via = "quadros"
         self.nota = ""
@@ -496,16 +501,20 @@ class Captura(threading.Thread):
             time.sleep(resto)
 
     # ---- modo video
-    def _stream(self, size, taxa):
-        """Um fluxo de screenrecord (até 180 s). Devolve 'interrompido', 'ok' ou 'falhou'."""
-        serial, estado0 = self.serial, (self.modo, self.perfil)
-        parar_gravacao_remota(self.adb, serial)
-        cmd = [self.adb, "-s", serial, "exec-out", "screenrecord", "--output-format=h264", "--bit-rate", taxa, "--time-limit", "180"]
+    LIMITE_GRAVACAO = 180  # s: o screenrecord do Android grava no maximo isso de uma vez
+    ANTECEDENCIA = 6  # s antes do fim em que a proxima gravacao ja e aberta (troca sem pausa)
+
+    def _abre_fluxo(self, serial, size, taxa, candidato=False):
+        """Uma gravacao (screenrecord) com seu decodificador. Os quadros so vao para a tela se ela for
+        a gravacao ativa; uma candidata assume no primeiro quadro (troca sem pausa)."""
+        cmd = [self.adb, "-s", serial, "exec-out", "screenrecord", "--output-format=h264", "--bit-rate", taxa,
+               "--time-limit", str(self.LIMITE_GRAVACAO)]
         if size:
             cmd += ["--size", size]
         cmd.append("-")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=SEM_JANELA, bufsize=0)
-        estado = {"frames": 0, "erro": "", "stderr": b""}
+        f = {"proc": proc, "frames": 0, "erro": "", "stderr": b"", "inicio": time.time(), "candidato": candidato,
+             "t_primeiro": None, "t_fim": None}
 
         def drena_erro():  # sem isso o pipe de erro pode encher e travar o screenrecord
             try:
@@ -513,7 +522,7 @@ class Captura(threading.Thread):
                     bloco = proc.stderr.read(1024)
                     if not bloco:
                         break
-                    estado["stderr"] = (estado["stderr"] + bloco)[-2048:]
+                    f["stderr"] = (f["stderr"] + bloco)[-2048:]
             except Exception:
                 pass
 
@@ -530,54 +539,103 @@ class Captura(threading.Thread):
                         break
                     try:
                         for pkt in codec.parse(dados):
+                            t0 = time.perf_counter()
                             for fr in codec.decode(pkt):
+                                f["frames"] += 1
+                                if f["t_primeiro"] is None:
+                                    f["t_primeiro"] = time.time()
+                                if self._fluxo_ativo is not f:
+                                    if not f["candidato"]:
+                                        continue  # gravacao antiga, ja substituida
+                                    self._fluxo_ativo = f  # a proxima gravacao assume sem pausa
                                 self._av = fr  # sem converter: so o quadro desenhado vira RGB
                                 self.t_frame = time.time()
                                 self.erro = ""
                                 self.seq += 1
-                                estado["frames"] += 1
+                                self.diag.quadro((time.perf_counter() - t0) * 1000, diagnostico_video.bytes_na_fila(proc))
                     except Exception as e:  # noqa: BLE001  pacote corrompido: segue com o proximo
-                        estado["erro"] = str(e)[:120]
+                        f["erro"] = str(e)[:120]
             except Exception as e:  # noqa: BLE001
-                estado["erro"] = str(e)[:120]
+                f["erro"] = str(e)[:120]
 
-        th = threading.Thread(target=leitor, daemon=True)
-        te = threading.Thread(target=drena_erro, daemon=True)
-        th.start()
-        te.start()
+        f["leitor"] = threading.Thread(target=leitor, daemon=True)
+        f["leitor"].start()
+        threading.Thread(target=drena_erro, daemon=True).start()
+        return f
+
+    @staticmethod
+    def _fecha_fluxo(f):
+        if f is None:
+            return
+        try:
+            f["proc"].kill()
+        except Exception:
+            pass
+        f["leitor"].join(timeout=1.0)
+
+    def _stream(self, size, taxa):
+        """Video continuo: gravacoes de ate 180 s emendadas sem pausa (a proxima abre antes do fim da
+        atual). Devolve 'interrompido', 'ok' (acabou e o ciclo reinicia) ou 'falhou'."""
+        serial, estado0 = self.serial, (self.modo, self.perfil)
+        parar_gravacao_remota(self.adb, serial)
+        atual = self._abre_fluxo(serial, size, taxa)
+        self._fluxo_ativo = atual
+        proximo = None
+        self.diag.evento("gravacao iniciada: %s, %s, %s" % (serial, size or "tamanho nativo", taxa))
         self.via = "video"
-        inicio = time.time()
-        motivo = "fim"
+        motivo, teve_quadro = "fim", False
         while True:
+            agora = time.time()
+            self.diag.periodico()
             if self.parar or not self.ativo or (self.modo, self.perfil) != estado0 or self.serial != serial:
                 motivo = "interrompido"
                 break
-            if proc.poll() is not None:
-                break
-            if not th.is_alive():  # decodificador morreu com o fluxo ainda aberto: reinicia
-                break
-            if estado["frames"] == 0 and time.time() - inicio > 12:
+            if atual["frames"] and not teve_quadro:
+                teve_quadro = True
+                self.diag.evento("primeiro quadro em %.1f s" % (atual["t_primeiro"] - atual["inicio"]))
+            # perto do fim da gravacao: abre a proxima para emendar sem pausa
+            if (proximo is None and atual["frames"] and serial not in self._sem_sobreposicao
+                    and agora - atual["inicio"] > self.LIMITE_GRAVACAO - self.ANTECEDENCIA):
+                proximo = self._abre_fluxo(serial, size, taxa, candidato=True)
+            if proximo is not None:
+                if self._fluxo_ativo is proximo:  # a proxima ja mostrou o primeiro quadro
+                    self.diag.evento("troca de gravacao sem pausa (a nova assumiu %.1f s depois de aberta)" % (
+                        proximo["t_primeiro"] - proximo["inicio"]))
+                    self._fecha_fluxo(atual)
+                    atual, proximo = proximo, None
+                    atual["candidato"] = False
+                    continue
+                if proximo["proc"].poll() is not None and not proximo["frames"]:
+                    self._sem_sobreposicao.add(serial)
+                    self.diag.evento("o aparelho nao aceita duas gravacoes ao mesmo tempo: reinicio normal a cada %d s" % self.LIMITE_GRAVACAO)
+                    self._fecha_fluxo(proximo)
+                    proximo = None
+            if atual["proc"].poll() is not None or not atual["leitor"].is_alive():
+                atual["t_fim"] = atual["t_fim"] or agora
+                # a proxima ainda nao mostrou quadro: espera um pouco por ela antes de reiniciar tudo
+                if proximo is None or proximo["proc"].poll() is not None or agora - atual["t_fim"] > 4:
+                    break
+            if atual["frames"] == 0 and agora - atual["inicio"] > 12:
                 motivo = "falhou"
                 break
-            if estado["frames"]:
+            if atual["frames"]:
                 self.falhas_video = 0
             elif self.falhas_video:  # nova tentativa depois de uma falha: a imagem segue por quadros
                 self._passo_quadros()
                 self.via = "video"
                 continue
             time.sleep(0.1)
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        th.join(timeout=1.0)
+        self._fecha_fluxo(proximo)
+        self._fecha_fluxo(atual)
         threading.Thread(target=parar_gravacao_remota, args=(self.adb, serial), daemon=True).start()
         if motivo == "interrompido":
             return "interrompido"
-        if estado["frames"] > 0:
+        if atual["frames"] > 0 or teve_quadro:
+            self.diag.evento("gravacao terminou (reinicio com pausa curta)")
             return "ok"
-        detalhe = estado["stderr"].decode("utf-8", "replace").strip().splitlines()
-        self.erro_video = (detalhe[-1] if detalhe else estado["erro"] or "sem imagem")[:120]
+        detalhe = atual["stderr"].decode("utf-8", "replace").strip().splitlines()
+        self.erro_video = (detalhe[-1] if detalhe else atual["erro"] or "sem imagem")[:120]
+        self.diag.evento("gravacao falhou: %s" % self.erro_video)
         return "falhou"
 
     def _ciclo_video(self):
@@ -2057,6 +2115,7 @@ class App:
         self.bt_mem = self._ferramenta(col, "memoria", "Mem\u00f3ria", "Mem\u00f3ria|Quanto cada app do aparelho est\u00e1 usando", self.abre_memoria)
         visual.titulo_secao(col, "Vision")
         self._ferramenta(col, "aparencia", "Apar\u00eancia", "Apar\u00eancia|Tema claro ou escuro e cor de destaque", self.abre_aparencia)
+        self._ferramenta(col, "logcat", "Registro do vídeo", "Registro do vídeo|Abre a pasta do video.log: travadas, trocas de gravação e um resumo a cada 10 s. Mande este arquivo quando o vídeo travar", self.abre_registro_video)
         self.bt_atualiza = self._ferramenta(col, "atualizar", "Buscar atualiza\u00e7\u00f5es", "Buscar atualiza\u00e7\u00f5es|Procura uma vers\u00e3o nova do Vision e instala com um clique", self.buscar_atualizacoes)
 
         # ---- coluna principal
@@ -2187,7 +2246,44 @@ class App:
         arqs = list(arqs)
         base = ["install-multiple"] if len(arqs) > 1 else ["install"]
         nome = os.path.basename(arqs[0]) + (" (+%d)" % (len(arqs) - 1) if len(arqs) > 1 else "")
-        self.tarefa("instalando %s em %s..." % (nome, serial), base + ["-r"] + arqs, lambda rc, saida: self._apos_instalar(rc, saida, base, arqs, nome))
+        extra = self._confirma_instalacao(serial, arqs, nome)
+        if extra is None:
+            return
+        self.tarefa("instalando %s em %s..." % (nome, serial), base + ["-r"] + extra + arqs, lambda rc, saida: self._apos_instalar(rc, saida, base, arqs, nome))
+
+    def _nome_aparelho(self, serial):
+        a = next((x for x in self.cap.aparelhos if x["serial"] == serial), None)
+        return rotulo_aparelho(a) if a else serial
+
+    def _confirma_instalacao(self, serial, arqs, nome):
+        """Mostra o que vai ser instalado (versao do APK x versao no aparelho) e pede confirmacao.
+        Devolve as opcoes extras do adb install ([] ou ["-d"] para downgrade) ou None se cancelado."""
+        self.root.configure(cursor="watch")
+        self.root.update_idletasks()
+        try:
+            info = apk.le_apks(arqs)
+            atual = versoes_no_aparelho(self.cap.adb, serial, [info["pacote"]]).get(info["pacote"], (None, None)) if info and info["pacote"] else (None, None)
+        finally:
+            self.root.configure(cursor="")
+        cab = "Aparelho: %s\nArquivo: %s\n\n" % (self._nome_aparelho(serial), nome)
+        if not info or not info["pacote"]:
+            ok = messagebox.askyesno("Instalar APK", cab + "N\u00e3o consegui ler a vers\u00e3o deste APK.\n\nInstalar mesmo assim?", parent=self.root)
+            return [] if ok else None
+        mudanca = "desconhecida" if atual[0] is False else apk.tipo_de_mudanca(info["codigo"], atual[1])
+        resumo = {
+            "nova": "Instala\u00e7\u00e3o nova: o app n\u00e3o est\u00e1 no aparelho.",
+            "atualizacao": "Atualiza\u00e7\u00e3o: o APK \u00e9 mais novo que o instalado.",
+            "mesma": "Mesma vers\u00e3o: o app ser\u00e1 reinstalado.",
+            "downgrade": "Aten\u00e7\u00e3o: o APK \u00e9 MAIS ANTIGO que o instalado (downgrade).",
+            "desconhecida": "N\u00e3o deu para comparar as vers\u00f5es.",
+        }[mudanca]
+        texto = cab + "Pacote: %s\nVers\u00e3o do APK: %s\nNo aparelho hoje: %s\n\n%s\n\n%s" % (
+            info["pacote"], texto_versao(info["versao"], info["codigo"]), texto_versao(*atual), resumo,
+            "Instalar a vers\u00e3o mais antiga mesmo assim?" if mudanca == "downgrade" else "Instalar?")
+        ok = messagebox.askyesno("Instalar APK", texto, icon="warning" if mudanca == "downgrade" else "question", parent=self.root)
+        if not ok:
+            return None
+        return ["-d"] if mudanca == "downgrade" else []
 
     def _apos_instalar(self, rc, saida, base, arqs, nome):
         self._fim_tarefa()
@@ -2257,7 +2353,14 @@ class App:
             escolhidos = [lista.get(i) for i in lista.curselection()]
             if not escolhidos:
                 return
-            aviso = "Desinstalar do aparelho %s:\n\n%s" % (serial, "\n".join(escolhidos))
+            dlg.configure(cursor="watch")
+            dlg.update_idletasks()
+            try:
+                versoes = versoes_no_aparelho(self.cap.adb, serial, escolhidos)
+            finally:
+                dlg.configure(cursor="")
+            linhas = ["%s  \u00b7  %s" % (pk, texto_versao(*versoes.get(pk, (None, None)))) for pk in escolhidos]
+            aviso = "Desinstalar do aparelho %s:\n\n%s" % (self._nome_aparelho(serial), "\n".join(linhas))
             aviso += "\n\nOs dados dos apps serao mantidos." if manter.get() else "\n\nOs DADOS dos apps serao apagados."
             if not messagebox.askyesno("Desinstalar APK", aviso, parent=dlg):
                 return
@@ -2546,6 +2649,7 @@ class App:
         self.tela.focus_set()
         if self.sel_on:  # seletor ligado: o clique escolhe o elemento e nao vai para o aparelho
             return self.sel_clique(e)
+        self.cap.diag.toque()
         ponto = self._ponto(e)
         self.toque = (ponto, time.time(), e.x, e.y)
         self.ripple(e.x, e.y)
@@ -2894,6 +2998,16 @@ class App:
         except Exception as e:  # noqa: BLE001
             self.aviso_rapido("não foi possível abrir nova sessão: %s" % str(e)[:80], 6)
 
+    def abre_registro_video(self):
+        """Mostra o video.log no Explorer (ja selecionado), para mandar quando o video travar."""
+        caminho = self.cap.diag.caminho
+        if not os.path.isfile(caminho):
+            self.cap.diag.evento("registro aberto pelo botao (ainda sem video nesta sessao)")
+        try:
+            subprocess.Popen(["explorer", "/select," + caminho], env=ambiente_limpo())
+        except Exception as e:  # noqa: BLE001
+            self.aviso_rapido("não consegui abrir a pasta: %s" % str(e)[:80], 6)
+
     # ---- aparencia: tema e cor de destaque
     def abre_aparencia(self):
         w = tk.Toplevel(self.root)
@@ -3078,6 +3192,8 @@ class App:
                 self.visto = cap.seq
                 self.desenha()
             custo = (time.perf_counter() - t0) * 1000
+            if custo > 0.5:
+                cap.diag.desenhou(custo)
         except Exception as e:  # noqa: BLE001
             self.aviso_rapido("erro ao desenhar: %s" % e)
             custo = 0
@@ -3177,6 +3293,37 @@ def comando_de_instalacao(instalador, exe_app, pids, espera=20):
         "Start-Process -FilePath %s -ArgumentList '/SILENT','/SUPPRESSMSGBOXES','/NORESTART'" % aspas(instalador),
     ])
     return ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", script]
+
+
+def versoes_no_aparelho(adb, serial, pacotes):
+    """{pacote: (versao, codigo)} lidos do aparelho; (None, None) para o que nao esta instalado e
+    (False, None) quando o aparelho nao respondeu (nao da para dizer se esta instalado)."""
+    pacotes = [x for x in pacotes if re.fullmatch(r"[A-Za-z0-9._]+", x)]
+    if not pacotes:
+        return {}
+    cmd = "; ".join("echo '##%s'; dumpsys package %s | grep -E 'versionName=|versionCode='" % (x, x) for x in pacotes) + "; true"  # o grep sem resultado nao vira erro
+    try:
+        rc, out, _ = rodar([adb, "-s", serial, "shell", cmd], timeout=30)
+    except Exception:  # noqa: BLE001
+        rc, out = 1, ""
+    if "##" not in out:  # o shell nem rodou (aparelho fora, sem permissao...)
+        return {x: (False, None) for x in pacotes}
+    partes, atual = {}, None
+    for linha in out.splitlines():
+        if linha.startswith("##"):
+            atual = linha[2:].strip()
+            partes[atual] = ""
+        elif atual:
+            partes[atual] += linha + "\n"
+    return {x: apk.versao_no_aparelho(partes.get(x, "")) for x in pacotes}
+
+
+def texto_versao(versao, codigo):
+    if versao is False:
+        return "não consegui ler (o aparelho não respondeu)"
+    if versao is None and codigo is None:
+        return "n\u00e3o instalado"
+    return "%s (c\u00f3digo %s)" % (versao or "?", codigo if codigo is not None else "?")
 
 
 def aplica_adb_lembrado(informado, cfg):

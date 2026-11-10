@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.6 - versão antes de instalar e vídeo sem travadas
+
+- **Instalar APK** pede confirmação mostrando o aparelho, o pacote, a versão do APK e a que já está no aparelho, e diz se é instalação nova, atualização, mesma versão ou downgrade (o downgrade já instala com `-d`). A versão é lida direto do APK, sem precisar do Android SDK no PC.
+- **Desinstalar APK** confirma listando cada app com a versão instalada.
+- **Vídeo contínuo**: a gravação seguinte abre antes de a atual acabar (o `screenrecord` grava no máximo 180 s) e a troca é sem pausa. No Moto G7 Play, 4 trocas seguidas sem nenhum buraco maior que 0,25 s.
+- **Vídeo rápido** a 4 Mbps (antes 2): telas que mudam inteiras, como véus de carregamento, deixam de borrar e engasgar.
+- **Registro do vídeo** (`%APPDATA%\Vision\video.log`, botão na seção Vision): gravações, um resumo a cada 10 s e cada travada percebida depois de um toque, com a causa provável (aparelho ou PC).
+
 ## 1.5 - atualização que fecha o app e reabre sem erro
 
 - Depois de atualizar, o Vision abria com o erro "Failed to load Python DLL": o Vision aberto pelo instalador herdava as variáveis internas do PyInstaller do Vision antigo e procurava a pasta temporária dele, que já tinha sido apagada. Agora tudo o que o Vision abre (instalador, nova sessão, reabrir) recebe um ambiente limpo, e o instalador abre o Vision pelo Explorer.

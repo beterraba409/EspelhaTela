@@ -78,8 +78,9 @@ import janela_wifi  # noqa: E402  (conectar pelo IP ou parear com codigo)
 import janela_logcat  # noqa: E402  (logcat ao vivo com filtros)
 import janela_bug  # noqa: E402  (reportar bug: print, video, logcat e texto do card)
 import recentes  # noqa: E402  (os ultimos 30 s do espelho na memoria)
+import janela_config  # noqa: E402  (ligar e desligar as ferramentas da barra lateral)
 
-VERSAO = "2.2"
+VERSAO = "2.3"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -2437,18 +2438,31 @@ class App:
                 ("volume_menos", lambda: self.tecla("25")), ("volume_mais", lambda: self.tecla("24")), ("energia", lambda: self.tecla("26"))], larg),
                 ("Volume \u2212|Diminui o volume", "Volume +|Aumenta o volume", "Tela|Liga ou desliga a tela do aparelho")):
             self._dica(b, d)
-        visual.titulo_secao(col, "Ferramentas")
-        self.bt_bug = self._ferramenta(col, "bug", "Reportar bug", "Reportar bug|Junta o print, o v\u00eddeo dos \u00faltimos 30 s, o logcat e os dados do aparelho numa pasta e num .zip, com o texto do card do Jira pronto (F8)", self.reportar_bug)
-        self.bt_sel = self._ferramenta(col, "seletor", "Seletor", "Seletor|Clique num elemento da tela para copiar o seletor do Maestro (id/testID ou texto). N\u00e3o use com um flow rodando (F6)", self.alterna_seletor)
-        self.bt_instala = self._ferramenta(col, "instalar", "Instalar APK", "Instalar APK|Escolha um ou mais APKs para instalar no aparelho", self.instalar_apk)
-        self.bt_desinstala = self._ferramenta(col, "desinstalar", "Desinstalar APK", "Desinstalar APK|Escolha os apps para remover (os favoritos t\u00eam atalho)", self.desinstalar_apk)
-        self.bt_log_vivo = self._ferramenta(col, "logcat_vivo", "Logcat ao vivo", "Logcat ao vivo|O log do aparelho em tempo real, com filtro por app, n\u00edvel e texto", self.abre_logcat_vivo)
-        self.bt_log = self._ferramenta(col, "logcat", "Exportar logcat", "Exportar logcat|Salva em arquivo o log dos \u00faltimos 2, 5 ou 10 minutos", self.menu_logcat)
-        self.bt_painel = self._ferramenta(col, "aparelho", "App e aparelho", "App e aparelho|Vers\u00e3o de qualquer app, abrir, parar, limpar dados, permiss\u00f5es e preparo para automa\u00e7\u00e3o", self.abre_painel)
-        self.bt_arq = self._ferramenta(col, "arquivos", "Arquivos", "Arquivos|Pastas do aparelho: baixar, enviar, abrir e excluir", self.abre_arquivos)
-        self.bt_grava = self._ferramenta(col, "gravar", "Gravar tela", "Gravar tela|Grava o que aparece no espelho em MP4 (vídeo) ou GIF (animação curta). Salva em Vídeos\\Vision", self.menu_gravar)
-        self.bt_mem = self._ferramenta(col, "memoria", "Mem\u00f3ria", "Mem\u00f3ria|Quanto cada app do aparelho est\u00e1 usando", self.abre_memoria)
+        self.titulo_ferr = visual.titulo_secao(col, "Ferramentas")
+        self.caixa_ferr = tk.Frame(col, bg=BG)  # as ferramentas ligadas em Configuracoes, sempre nesta ordem
+        self.caixa_ferr.pack(fill="x")
+        self.ferramentas = []  # [(chave, icone, nome, descricao, botao)]
+        for chave, icone, nome, dica, cmd in (
+                ("bug", "bug", "Reportar bug", "Junta o print, o v\u00eddeo dos \u00faltimos 30 s, o logcat e os dados do aparelho numa pasta e num .zip, com o texto do card do Jira pronto (F8)", self.reportar_bug),
+                ("seletor", "seletor", "Seletor", "Clique num elemento da tela para copiar o seletor do Maestro (id/testID ou texto). N\u00e3o use com um flow rodando (F6)", self.alterna_seletor),
+                ("instalar", "instalar", "Instalar APK", "Escolha um ou mais APKs para instalar no aparelho (ou solte o APK em cima do espelho)", self.instalar_apk),
+                ("desinstalar", "desinstalar", "Desinstalar APK", "Escolha os apps para remover (os favoritos t\u00eam atalho)", self.desinstalar_apk),
+                ("logcat_vivo", "logcat_vivo", "Logcat ao vivo", "O log do aparelho em tempo real, com filtro por app, n\u00edvel e texto", self.abre_logcat_vivo),
+                ("logcat", "logcat", "Exportar logcat", "Salva em arquivo o log dos \u00faltimos 2, 5 ou 10 minutos", self.menu_logcat),
+                ("aparelho", "aparelho", "App e aparelho", "Vers\u00e3o de qualquer app, abrir, parar, limpar dados, permiss\u00f5es e preparo para automa\u00e7\u00e3o", self.abre_painel),
+                ("arquivos", "arquivos", "Arquivos", "Pastas do aparelho: baixar, enviar, abrir e excluir", self.abre_arquivos),
+                ("gravar", "gravar", "Gravar tela", "Grava o que aparece no espelho em MP4 (v\u00eddeo) ou GIF (anima\u00e7\u00e3o curta)", self.menu_gravar),
+                ("memoria", "memoria", "Mem\u00f3ria", "Quanto cada app do aparelho est\u00e1 usando", self.abre_memoria)):
+            b = self._ferramenta(self.caixa_ferr, icone, nome, "%s|%s" % (nome, dica), cmd)
+            self.ferramentas.append((chave, icone, nome, dica, b))
+        bt = {c: b for c, _, _, _, b in self.ferramentas}
+        self.bt_bug, self.bt_sel, self.bt_instala, self.bt_desinstala = bt["bug"], bt["seletor"], bt["instalar"], bt["desinstalar"]
+        self.bt_log_vivo, self.bt_log, self.bt_painel, self.bt_arq = bt["logcat_vivo"], bt["logcat"], bt["aparelho"], bt["arquivos"]
+        self.bt_grava, self.bt_mem = bt["gravar"], bt["memoria"]
+        self.ferr_ocultas = janela_config.ocultas_do_config(self.config, bt)
+        self._aplica_ferramentas()
         visual.titulo_secao(col, "Vision")
+        self._ferramenta(col, "config", "Configura\u00e7\u00f5es", "Configura\u00e7\u00f5es|Escolha quais ferramentas aparecem na barra lateral", self.abre_config)
         self._ferramenta(col, "aparencia", "Apar\u00eancia", "Apar\u00eancia|Tema claro ou escuro e cor de destaque", self.abre_aparencia)
         self._ferramenta(col, "logcat", "Registro do vídeo", "Registro do vídeo|Abre a pasta do video.log: travadas, trocas de gravação e um resumo a cada 10 s. Mande este arquivo quando o vídeo travar", self.abre_registro_video)
         self.bt_atualiza = self._ferramenta(col, "atualizar", "Buscar atualiza\u00e7\u00f5es", "Buscar atualiza\u00e7\u00f5es|Procura uma vers\u00e3o nova do Vision e instala com um clique", self.buscar_atualizacoes)
@@ -2504,8 +2518,8 @@ class App:
         root.bind("<Control-s>", lambda e: self.salva())
         root.bind("<F11>", lambda e: self.tela_cheia())
         root.bind("<F9>", lambda e: self.alterna_lateral())
-        root.bind("<F6>", lambda e: self.alterna_seletor())
-        root.bind("<F8>", lambda e: self.reportar_bug())
+        root.bind("<F6>", lambda e: self.alterna_seletor() if self.ativa("seletor") else None)
+        root.bind("<F8>", lambda e: self.reportar_bug() if self.ativa("bug") else None)
         root.bind("<Configure>", self.mudou_tamanho)
         root.bind("<Unmap>", lambda e: setattr(self.cap, "ativo", False) if e.widget is root else None)
         root.bind("<Map>", lambda e: setattr(self.cap, "ativo", not self.pausado) if e.widget is root else None)
@@ -2520,6 +2534,36 @@ class App:
     def _dica(self, widget, dica):
         titulo, _, detalhe = dica.partition("|")
         Dica(widget, titulo, detalhe)
+
+    def ativa(self, chave):
+        """A ferramenta esta ligada em Configuracoes? (desligada: nem o atalho de teclado funciona)"""
+        return chave not in getattr(self, "ferr_ocultas", set())
+
+    def _aplica_ferramentas(self):
+        """Mostra so as ferramentas ligadas, na ordem de sempre; sem nenhuma, some o titulo da secao."""
+        for _, _, _, _, b in self.ferramentas:
+            b.pack_forget()
+        visiveis = [b for c, _, _, _, b in self.ferramentas if self.ativa(c)]
+        for b in visiveis:
+            b.pack(fill="x", pady=(0, 6))
+        if self.titulo_ferr is not None:
+            if visiveis:
+                self.titulo_ferr.pack(fill="x", pady=(12, 4), before=self.caixa_ferr)
+            else:
+                self.titulo_ferr.pack_forget()
+        if not self.ativa("seletor") and getattr(self, "sel_on", False):
+            self.alterna_seletor()  # o seletor ligado some junto com o botao
+
+    def abre_config(self):
+        lista = [(c, ic, n, d) for c, ic, n, d, _ in self.ferramentas]
+
+        def mudou(ocultas):
+            self.ferr_ocultas = ocultas
+            self.config["ferramentas_ocultas"] = [c for c, _, _, _ in lista if c in ocultas]
+            salvar_config(self.config)
+            self._aplica_ferramentas()
+
+        janela_config.JanelaConfig(self.root, lista, self.ferr_ocultas, mudou, icone=aplica_icone)
 
     def _ferramenta(self, pai, icone, texto, dica, cmd):
         b = visual.Botao(pai, icone, texto, comando=cmd, largura=172, altura=38)
@@ -2628,8 +2672,8 @@ class App:
         """Arquivos soltos do Explorer na janela principal: APK instala (com a confirmacao de versao);
         outros arquivos podem ir para a pasta Download do aparelho."""
         self.root.lift()
-        apks = [c for c in caminhos if c.lower().endswith(".apk") and os.path.isfile(c)]
-        outros = [c for c in caminhos if c not in apks and os.path.exists(c)]
+        apks = [c for c in caminhos if c.lower().endswith(".apk") and os.path.isfile(c)] if self.ativa("instalar") else []
+        outros = [c for c in caminhos if not c.lower().endswith(".apk") and os.path.exists(c)] if self.ativa("arquivos") else []
         if apks:
             self.fila_apks = grupos_de_apks(apks)
             self.instalar_apk(self.fila_apks.pop(0))

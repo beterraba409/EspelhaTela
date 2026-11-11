@@ -69,6 +69,7 @@ python espelha_tela.py
 | 🌐 | **Conectar pelo Wi-Fi** | Pelo IP (`adb connect`) ou **pareando com código** (Android 11+). O endereço fica salvo e é reconectado sozinho. |
 | 🔌 | **Aviso de adb e porta** | Detecta um `adb.cmd` ou `ADB_SERVER_PORT` apontando para um servidor sem aparelhos e oferece **Usar a porta N**. |
 | 📋 | **Copiar e colar** | **Ctrl+V** cola no aparelho o texto copiado no PC, com acentos. **Ctrl+C** copia a seleção do aparelho para o PC. O que um app copiar no aparelho (como o botão de copiar o serial) chega sozinho ao PC. **Botão direito** na tela copia o texto sob o mouse (até o que não dá para selecionar, como um serial) ou todo o texto da tela. |
+| ⚙️ | **Configurações** | Liga e desliga cada ferramenta da barra lateral: cada usuário deixa à mostra só o que usa. |
 | 📷 | **Captura e tela cheia** | PNG em `Imagens\Vision` (Ctrl+S) e tela cheia (F11). |
 
 **Atalhos:** `Ctrl+V` cola no aparelho · `Ctrl+C` copia do aparelho · `F6` liga o seletor · `F8` reportar bug · `F9` mostra/oculta a barra lateral · `F11` tela cheia · `Ctrl+S` salva a captura · `Esc` sai do seletor.

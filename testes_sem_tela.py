@@ -805,5 +805,14 @@ class SoltarApk(unittest.TestCase):
             self.assertEqual(E.grupos_de_apks([a, b]), [[a], [b]])
 
 
+class Configuracoes(unittest.TestCase):
+    def test_ferramentas_ocultas_salvas(self):
+        import janela_config as C
+        chaves = {"bug", "seletor", "memoria"}
+        self.assertEqual(C.ocultas_do_config({"ferramentas_ocultas": ["seletor", "sumiu"]}, chaves), {"seletor"})
+        self.assertEqual(C.ocultas_do_config({}, chaves), set())
+        self.assertEqual(C.ocultas_do_config({"ferramentas_ocultas": None}, chaves), set())
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

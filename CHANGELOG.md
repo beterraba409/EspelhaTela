@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.3 - Configurações: escolha suas ferramentas
+
+- **Configurações** (seção Vision): um interruptor para cada ferramenta da barra lateral. Desligada, a ferramenta some do Vision, junto com o atalho de teclado dela (F6 do Seletor, F8 do Reportar bug) e o que ela faz ao soltar arquivos no espelho; ligada, volta no mesmo lugar. **Mostrar todas** liga tudo de novo. A escolha fica no `config.json` de cada usuário, então cada um monta o seu Vision.
+
 ## 2.2 - reportar bug, logcat ao vivo, pareamento por Wi-Fi
 
 - **Reportar bug** (Ferramentas ou F8): no clique, o Vision guarda a tela em resolução total, o vídeo dos **últimos 30 s** do espelho, o logcat dos últimos 5 minutos e os dados do aparelho e do app em primeiro plano (com a versão). Você preenche Título, Descrição, Teste realizado, Resultado esperado e Resultado obtido, e ele monta uma pasta em `Documentos\Vision\Bugs` com `print.png`, `ultimos-segundos.mp4`, `logcat.txt` e `bug.md`, mais um `.zip` para anexar no Jira. O texto do card vai para a área de transferência. Para ter o vídeo de antes do clique, o Vision guarda sempre os últimos 30 s em quadros reduzidos (cerca de 10 MB; dá para desligar na própria janela).

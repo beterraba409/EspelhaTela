@@ -46,6 +46,7 @@ ICONES = {
     "memoria": ("", "\U0001F4CA"),
     "gravar": ("", "⏺"),
     "logcat_vivo": ("", "\U0001F4C8"),
+    "config": ("", "⚙"),
     "bug": ("", "\U0001F41E"),
     "atualizar": ("", "↻"),
     "rede": ("", "+"),
@@ -226,6 +227,7 @@ def titulo_secao(pai, texto):
     c.pack(fill="x", pady=(12, 4))
     c.create_rectangle(2, 7, 5, 22, fill=ACENTO, outline="")
     c.create_text(13, 15, text=texto, font=(fontes(pai)["forte"], 11), fill=FG, anchor="w")
+    return c
 
 
 def linha_de_icones(pai, itens, largura_total, altura=36, espaco=5):

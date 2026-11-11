@@ -71,7 +71,7 @@ import atualizacao  # noqa: E402  (busca de versoes novas no GitHub)
 import apk  # noqa: E402  (pacote e versao de um APK, sem o Android SDK)
 import diagnostico_video  # noqa: E402  (registro das travadas do video)
 
-VERSAO = "1.8"
+VERSAO = "1.9"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -2220,6 +2220,7 @@ class App:
         self.tela.bind("<B1-Motion>", self.moveu)
         self.tela.bind("<ButtonRelease-1>", self.soltou)
         self.tela.bind("<MouseWheel>", self.rolou)
+        self.tela.bind("<Button-3>", self.menu_copiar_texto)  # textos da tela do aparelho para o PC
         self.tela.bind("<Motion>", self.passou)
         self.sel_painel = tk.Frame(centro, bg=BG2)
 
@@ -2945,6 +2946,41 @@ class App:
             tk.Label(linha, text=rotulo, bg=BG2, fg=FG2, font=("Segoe UI", 8), anchor="w").pack(fill="x")
             tk.Label(linha, text=texto, bg=BG, fg=FG, font=("Consolas", 9), anchor="w", justify="left", padx=6, pady=2).pack(fill="x", padx=(0, 6))
         tk.Frame(self.sel_painel, bg=BG2, height=4).pack()
+
+    # ---- copiar textos da tela do aparelho (os que nao da para selecionar, como o serial na tela inicial)
+    def menu_copiar_texto(self, e):
+        if self.sel_on:
+            return
+        ponto, serial = self._ponto(e), self.cap.serial
+        if not ponto or not serial:
+            return
+        x_tela, y_tela = e.x_root, e.y_root
+        self.aviso_rapido("lendo os textos da tela\u2026", 8)
+
+        def trabalho():
+            nos, erro = seletor.ler_tela(rodar, self.cap.adb, serial)
+            self.root.after(0, lambda: self._menu_textos(nos, erro, ponto, x_tela, y_tela))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _menu_textos(self, nos, erro, ponto, x, y):
+        self.msg = ("", 0.0)  # tira o "lendo..."
+        m = tk.Menu(self.root, tearoff=0, bg=BG2, fg=FG, activebackground=ACENTO, activeforeground="#ffffff",
+                    disabledforeground=FG2, bd=0)
+        if not nos:
+            m.add_command(label="N\u00e3o consegui ler a tela: %s" % resumo_texto(erro or "sem resposta", 50), state="disabled")
+        else:
+            textos = seletor.textos_no_ponto(nos, *ponto)
+            if textos:
+                for t in textos:
+                    m.add_command(label="Copiar \u201c%s\u201d" % resumo_texto(t, 48), command=lambda t=t: self.copiar(t))
+            else:
+                m.add_command(label="Nenhum texto neste ponto", state="disabled")
+            m.add_separator()
+            tudo = seletor.texto_da_tela(nos)
+            m.add_command(label="Copiar todo o texto da tela", state="normal" if tudo else "disabled",
+                          command=lambda: self.copiar(tudo))
+        m.tk_popup(x, y)
 
     def copiar(self, texto):
         self.root.clipboard_clear()

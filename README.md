@@ -65,7 +65,7 @@ python espelha_tela.py
 | 📜 | **Exportar logcat** | O log dos últimos 2, 5 ou 10 minutos num arquivo, usando a hora do aparelho. |
 | 🌐 | **+ IP** | `adb connect` pela rede. O endereço fica salvo e é reconectado sozinho. |
 | 🔌 | **Aviso de adb e porta** | Detecta um `adb.cmd` ou `ADB_SERVER_PORT` apontando para um servidor sem aparelhos e oferece **Usar a porta N**. |
-| 📋 | **Copiar e colar** | **Ctrl+V** cola no aparelho o texto copiado no PC, com acentos. **Ctrl+C** copia a seleção do aparelho para o PC. |
+| 📋 | **Copiar e colar** | **Ctrl+V** cola no aparelho o texto copiado no PC, com acentos. **Ctrl+C** copia a seleção do aparelho para o PC. **Botão direito** na tela copia o texto sob o mouse (até o que não dá para selecionar, como um serial) ou todo o texto da tela. |
 | 📷 | **Captura e tela cheia** | PNG em `Imagens\Vision` (Ctrl+S) e tela cheia (F11). |
 
 **Atalhos:** `Ctrl+V` cola no aparelho · `Ctrl+C` copia do aparelho · `F6` liga o seletor · `F9` mostra/oculta a barra lateral · `F11` tela cheia · `Ctrl+S` salva a captura · `Esc` sai do seletor.

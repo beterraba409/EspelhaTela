@@ -87,6 +87,48 @@ def descendente_com_texto(nos, i):
     return None
 
 
+def textos_no_ponto(nos, x, y, limite=4):
+    """Textos para copiar a partir de um ponto da tela, do mais especifico ao mais geral: o do menor
+    elemento sob o ponto, o de um filho (botao do RN guarda o texto num filho) e o dos que o contem.
+    Usa o texto e, sem ele, a descricao de acessibilidade."""
+    contem = [k for k, no in enumerate(nos)
+              if _area(no["bounds"]) and no["bounds"][0] <= x < no["bounds"][2] and no["bounds"][1] <= y < no["bounds"][3]]
+    contem.sort(key=lambda k: (_area(nos[k]["bounds"]), -nos[k]["prof"]))
+    saida = []
+
+    def junta(t):
+        t = (t or "").strip()
+        if t and t not in saida:
+            saida.append(t)
+
+    if contem:
+        # o texto de um filho so vale para botao (clicavel); num fundo vazio pegaria um texto qualquer da tela
+        d = descendente_com_texto(nos, contem[0]) if nos[contem[0]].get("clickable") == "true" else None
+        junta(nos[contem[0]]["text"])
+        junta(nos[contem[0]]["content-desc"])
+        if d is not None:
+            junta(nos[d]["text"])
+    for k in contem[1:]:
+        junta(nos[k]["text"])
+        junta(nos[k]["content-desc"])
+    return saida[:limite]
+
+
+def texto_da_tela(nos):
+    """Todos os textos visiveis em ordem de leitura (de cima para baixo e da esquerda para a direita)."""
+    itens = []
+    for no in nos:
+        t = no["text"].strip()
+        b = no["bounds"]
+        if t and _area(b):
+            itens.append((b[1] // 12, b[0], t))  # mesma linha: topo parecido (12 px de folga)
+    linhas = []
+    for _, _, t in sorted(itens):
+        if not linhas or linhas[-1] != t:
+            linhas.append(t)
+    return chr(10).join(linhas)  # uma linha por texto
+
+
 def yaml_str(valor):
     """String YAML entre aspas duplas. Quebra de linha vira espaco (o Maestro compara assim)."""
     v = " ".join(valor.split())

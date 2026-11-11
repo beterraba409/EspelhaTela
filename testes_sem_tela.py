@@ -482,5 +482,38 @@ class CodificadorEmUso(unittest.TestCase):
         self.assertIsNone(DV.codificador_em_uso("I MediaCodec: init name(outro.codec)", self.CONHECIDOS))
 
 
+TELA_TEXTOS = """<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0">
+<node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="app" content-desc="" bounds="[0,0][720,1280]">
+<node index="0" text="Serial: 4AG602S0G" resource-id="" class="android.widget.TextView" package="app" content-desc="" bounds="[40,1200][680,1240]" />
+<node index="1" text="Bem-vindo" resource-id="" class="android.widget.TextView" package="app" content-desc="" bounds="[40,100][400,150]" />
+<node index="2" text="" resource-id="button-iniciar" class="android.view.ViewGroup" package="app" content-desc="" clickable="true" bounds="[40,300][680,500]">
+<node index="0" text="Iniciar Atendimento" resource-id="" class="android.widget.TextView" package="app" content-desc="" bounds="[100,420][620,470]" />
+</node>
+<node index="3" text="" resource-id="" class="android.widget.ImageView" package="app" content-desc="Fechar" bounds="[620,100][700,180]" />
+</node>
+</hierarchy>"""
+
+
+class CopiarTextos(unittest.TestCase):
+    def setUp(self):
+        self.nos = S.le_nos(TELA_TEXTOS)
+
+    def test_texto_sob_o_mouse(self):
+        self.assertEqual(S.textos_no_ponto(self.nos, 300, 1220), ["Serial: 4AG602S0G"])
+
+    def test_botao_com_texto_no_filho(self):
+        # clique na area do botao, fora do texto: o texto do filho vem junto
+        self.assertEqual(S.textos_no_ponto(self.nos, 60, 320), ["Iniciar Atendimento"])
+
+    def test_icone_so_com_descricao(self):
+        self.assertEqual(S.textos_no_ponto(self.nos, 650, 140), ["Fechar"])
+
+    def test_ponto_sem_texto(self):
+        self.assertEqual(S.textos_no_ponto(self.nos, 10, 700), [])
+
+    def test_todo_o_texto_em_ordem_de_leitura(self):
+        self.assertEqual(S.texto_da_tela(self.nos).split(chr(10)), ["Bem-vindo", "Iniciar Atendimento", "Serial: 4AG602S0G"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

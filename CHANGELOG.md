@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.9 - copiar textos da tela do aparelho
+
+- **Botão direito** no espelho abre "Copiar “texto”" com o texto do elemento sob o mouse (ou do botão que o contém) e "Copiar todo o texto da tela". Funciona com textos que não dá para selecionar no Android, como o serial na tela inicial do SmartPOS. O texto vem da árvore da tela (a mesma leitura do Seletor; não use com um flow do Maestro rodando).
+
 ## 1.8 - codificador de vídeo em uso, de verdade
 
 - O registro do vídeo dizia qual codificador estava em uso pela ordem dos arquivos do Android, que não é a ordem em que ele escolhe: no L400 isso deu um aviso falso de "codificador de software". Agora ele lê no logcat o codificador que a gravação abriu de fato (sem limpar o logcat). Em aparelho que restringe o logcat, o registro diz que não deu para ver, em vez de chutar.

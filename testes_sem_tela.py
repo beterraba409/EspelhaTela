@@ -678,5 +678,132 @@ class JanelaDeGravacao(unittest.TestCase):
                          "gravacao-192.168.1.6_5555-20261111-154834")
 
 
+class PareamentoWifi(unittest.TestCase):
+    MDNS = chr(10).join([
+        "List of discovered mdns services",
+        "adb-4AG602S0G-xYz12\t_adb-tls-pairing._tcp.\t192.168.1.20:37451",
+        "adb-4AG602S0G-xYz12\t_adb-tls-connect._tcp.\t192.168.1.20:41235",
+        "adb-OUTRO-aa\t_adb-tls-connect._tcp.\t192.168.1.30:40000",
+    ])
+
+    def test_porta_de_conexao_do_mesmo_ip(self):
+        import janela_wifi as W
+        self.assertEqual(W.porta_de_conexao(self.MDNS, "192.168.1.20"), "192.168.1.20:41235")
+        self.assertIsNone(W.porta_de_conexao(self.MDNS, "192.168.1.99"))
+
+    def test_enderecos(self):
+        import janela_wifi as W
+        self.assertTrue(W.endereco_valido("192.168.1.20"))
+        self.assertFalse(W.endereco_valido("192.168.1.20", exige_porta=True))
+        self.assertFalse(W.endereco_valido("300.1.1.1:5555"))
+        self.assertTrue(W.pareou("Successfully paired to 192.168.1.20:37451 [guid=adb-4AG602S0G-xYz12]"))
+
+    def test_parear_e_conectar_acha_a_porta_sozinho(self):
+        import janela_wifi as W
+        chamadas = []
+
+        def rodar(cmd, timeout=0):
+            chamadas.append(cmd[1:])
+            if cmd[1] == "pair":
+                return 0, "Successfully paired to 192.168.1.20:37451", ""
+            if cmd[1] == "mdns":
+                return 0, self.MDNS, ""
+            return 0, "connected to 192.168.1.20:41235", ""
+
+        self.assertEqual(W.parear_e_conectar(rodar, "adb", "192.168.1.20:37451", "123456"),
+                         ("192.168.1.20:41235", "conectado em 192.168.1.20:41235"))
+        self.assertEqual(chamadas[0], ["pair", "192.168.1.20:37451", "123456"])
+
+    def test_codigo_errado(self):
+        import janela_wifi as W
+        rodar = lambda cmd, timeout=0: (1, "", "Failed: Wrong password or connection was dropped.")  # noqa: E731
+        end, msg = W.parear_e_conectar(rodar, "adb", "192.168.1.20:37451", "000000")
+        self.assertIsNone(end)
+        self.assertIn("Wrong password", msg)
+
+
+class LogcatAoVivo(unittest.TestCase):
+    def test_linha_do_logcat(self):
+        import janela_logcat as L
+        i = L.parse_linha("11-11 16:01:02.345  1234  1250 E ReactNativeJS: Placa nao encontrada")
+        self.assertEqual((i["pid"], i["nivel"], i["tag"], i["msg"]), (1234, "E", "ReactNativeJS", "Placa nao encontrada"))
+        self.assertIsNone(L.parse_linha("--------- beginning of main"))
+
+    def test_filtros(self):
+        import janela_logcat as L
+        i = L.parse_linha("11-11 16:01:02.345  1234  1250 W Rede: tempo esgotado")
+        self.assertTrue(L.passa(i, "D", None, ""))
+        self.assertFalse(L.passa(i, "E", None, ""))
+        self.assertTrue(L.passa(i, "V", {1234}, "ESGOTADO"))
+        self.assertFalse(L.passa(i, "V", {999}, ""))
+        self.assertFalse(L.passa(i, "V", set(), ""))  # app escolhido que nao esta rodando
+
+
+class ReportarBug(unittest.TestCase):
+    def test_nome_da_pasta(self):
+        import datetime
+        import janela_bug as B
+        self.assertEqual(B.nome_pasta("Placa não encontrada: sem retorno!", datetime.datetime(2026, 11, 11, 16, 20)),
+                         "2026-11-11_1620-placa-nao-encontrada-sem-retorno")
+
+    def test_texto_do_card(self):
+        import datetime
+        import janela_bug as B
+        props = B.le_getprop(chr(10).join(["ro.product.manufacturer=Positivo", "ro.product.model=L400",
+                                           "ro.build.version.release=11", "ro.build.version.sdk=30", "ro.serialno=4AG602S0G"]))
+        amb = B.ambiente_de(props, "4AG602S0G", "com.smartposv2.rede", "1.0.47 (código 147)", datetime.datetime(2026, 11, 11, 16, 20, 33), "2.2")
+        self.assertEqual(amb[0], "Aparelho: Positivo L400 (Android 11, SDK 30), serial 4AG602S0G")
+        t = B.texto_bug("Placa não encontrada", {"descricao": "Leitura de placa", "obtido": "Nada aparece"}, amb, ["print.png"])
+        for trecho in ("**Placa não encontrada**", "**Teste realizado**" + chr(10) + "-", "**Resultado obtido**" + chr(10) + "Nada aparece",
+                       "- App em primeiro plano: com.smartposv2.rede 1.0.47 (código 147)", "**Anexos:** print.png"):
+            self.assertIn(trecho, t)
+
+    def test_zip_com_os_arquivos(self):
+        import zipfile
+        import janela_bug as B
+        with tempfile.TemporaryDirectory() as d:
+            pasta = os.path.join(d, "bug")
+            os.makedirs(pasta)
+            for n in ("bug.md", "logcat.txt"):
+                with open(os.path.join(pasta, n), "w") as f:
+                    f.write("x")
+            with zipfile.ZipFile(B.compacta(pasta)) as z:
+                self.assertEqual(sorted(z.namelist()), ["bug.md", "logcat.txt"])
+
+
+class UltimosSegundos(unittest.TestCase):
+    def test_guarda_so_a_janela_e_vira_mp4(self):
+        import time
+        import av
+        from PIL import Image
+        import recentes as R
+        m = R.UltimosSegundos(segundos=1.0, fps=50)
+        for i in range(40):
+            m.quadro(Image.new("RGB", (305, 641), (i * 6, 0, 0)))
+            time.sleep(0.04)
+        time.sleep(0.3)
+        q = m.congela()
+        self.assertTrue(q)
+        self.assertLessEqual(q[-1][0] - q[0][0], 1.0 + 1e-6)  # so o ultimo segundo
+        self.assertEqual(Image.open(__import__("io").BytesIO(q[0][1])).height, R.ALTURA_MAX)
+        with tempfile.TemporaryDirectory() as d:
+            c = os.path.join(d, "v.mp4")
+            R.salva_mp4(q, c, ate=q[-1][0] + 2.0)
+            with av.open(c) as ct:
+                s = ct.streams.video[0]
+                self.assertEqual((s.codec_context.name, s.height % 2, s.width % 2), ("h264", 0, 0))
+                self.assertGreater(float(ct.duration) / 1e6, 2.5)  # a tela do clique fica no fim
+
+
+class SoltarApk(unittest.TestCase):
+    def test_apps_diferentes_um_apos_o_outro(self):
+        import espelha_tela as E
+        with tempfile.TemporaryDirectory() as d:
+            a, b = os.path.join(d, "a.apk"), os.path.join(d, "b.apk")
+            for c in (a, b):
+                open(c, "wb").close()  # nao e APK valido: cada um vai sozinho
+            self.assertEqual(E.grupos_de_apks([a, b]), [[a], [b]])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

@@ -74,8 +74,12 @@ import arrastar  # noqa: E402  (arquivos soltos do Explorer na janela)
 import transferencia  # noqa: E402  (adb pull/push com progresso e cancelamento)
 import gravacao  # noqa: E402  (gravar a tela em .mp4 ou .gif)
 import janela_gravacao  # noqa: E402  (janela de escolha do formato e do destino da gravacao)
+import janela_wifi  # noqa: E402  (conectar pelo IP ou parear com codigo)
+import janela_logcat  # noqa: E402  (logcat ao vivo com filtros)
+import janela_bug  # noqa: E402  (reportar bug: print, video, logcat e texto do card)
+import recentes  # noqa: E402  (os ultimos 30 s do espelho na memoria)
 
-VERSAO = "2.1"
+VERSAO = "2.2"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -380,6 +384,7 @@ class Captura(threading.Thread):
         super().__init__(daemon=True)
         self.adb = adb
         self.gravacao = None  # gravacao de tela em andamento (recebe cada quadro mostrado)
+        self.recentes = None  # os ultimos segundos para o Reportar bug (recentes.UltimosSegundos)
         self.serial = serial
         self.intervalo_min = intervalo_min
         self.modo = modo
@@ -506,6 +511,9 @@ class Captura(threading.Thread):
             g = self.gravacao
             if g is not None:
                 g.quadro(img)
+            r = self.recentes
+            if r is not None:
+                r.quadro(img)
             self.ms = int((time.time() - t0) * 1000)
             self.erro = ""
             self.seq += 1
@@ -558,6 +566,9 @@ class Captura(threading.Thread):
                     g = self.gravacao
                     if g is not None:
                         g.quadro(fr)
+                    r = self.recentes
+                    if r is not None:
+                        r.quadro(fr)
                     self.t_frame = time.time()
                     self.erro = ""
                     self.seq += 1
@@ -2326,6 +2337,23 @@ def favoritos(cfg):
     return [p for p in (cfg.get("favoritos") or []) if isinstance(p, str) and re.fullmatch(r"[A-Za-z0-9._]+", p)]
 
 
+def grupos_de_apks(caminhos):
+    """APKs soltos de uma vez: as do mesmo pacote (app dividido em splits) instalam juntas; apps
+    diferentes, um apos o outro. A ordem de chegada e mantida."""
+    grupos, por_pacote = [], {}
+    for c in caminhos:
+        try:
+            pacote = apk.le_apk(c).get("pacote") or c
+        except Exception:  # noqa: BLE001  (nao deu para ler: instala sozinho)
+            pacote = c
+        if pacote in por_pacote:
+            por_pacote[pacote].append(c)
+        else:
+            por_pacote[pacote] = [c]
+            grupos.append(por_pacote[pacote])
+    return grupos
+
+
 def resumo_texto(txt, limite=40):
     """Texto de uma linha, cortado, para os avisos de copiar e colar."""
     t = " ".join(txt.split())
@@ -2357,6 +2385,10 @@ class App:
         self.fila = queue.Queue()
         self.inj = Injetor(cap.adb)
         self.clip_visto = {}  # serial -> (marca, texto) da area de transferencia do aparelho
+        self.fila_apks = []  # apps soltos no espelho esperando a vez de instalar
+        self.bugs_prontos = []  # (pasta, zip, texto, erros) vindos da thread do Reportar bug
+        if self.config.get("guardar_recentes", True):
+            cap.recentes = recentes.UltimosSegundos()
         self.gravacoes_prontas = []  # (caminho, erro, motivo) vindos da thread da gravacao
         self.clip_do_pc = ""  # o que o Ctrl+V mandou para o aparelho (nao volta para o PC como novidade)
         threading.Thread(target=self._sincroniza_area_loop, daemon=True).start()
@@ -2365,6 +2397,7 @@ class App:
         self.fps_hist = []
         self.resultados = queue.Queue()  # respostas das tarefas longas (instalar/desinstalar)
         self.mem = None  # janela do monitor de memoria
+        self.logvivo = None  # janela do logcat ao vivo
         self.ocupado = ""
         self.adb_porta = adb_servidor.porta_do_ambiente()
         self.sel_on = False  # seletor de identificador ligado
@@ -2405,9 +2438,11 @@ class App:
                 ("Volume \u2212|Diminui o volume", "Volume +|Aumenta o volume", "Tela|Liga ou desliga a tela do aparelho")):
             self._dica(b, d)
         visual.titulo_secao(col, "Ferramentas")
+        self.bt_bug = self._ferramenta(col, "bug", "Reportar bug", "Reportar bug|Junta o print, o v\u00eddeo dos \u00faltimos 30 s, o logcat e os dados do aparelho numa pasta e num .zip, com o texto do card do Jira pronto (F8)", self.reportar_bug)
         self.bt_sel = self._ferramenta(col, "seletor", "Seletor", "Seletor|Clique num elemento da tela para copiar o seletor do Maestro (id/testID ou texto). N\u00e3o use com um flow rodando (F6)", self.alterna_seletor)
         self.bt_instala = self._ferramenta(col, "instalar", "Instalar APK", "Instalar APK|Escolha um ou mais APKs para instalar no aparelho", self.instalar_apk)
         self.bt_desinstala = self._ferramenta(col, "desinstalar", "Desinstalar APK", "Desinstalar APK|Escolha os apps para remover (os favoritos t\u00eam atalho)", self.desinstalar_apk)
+        self.bt_log_vivo = self._ferramenta(col, "logcat_vivo", "Logcat ao vivo", "Logcat ao vivo|O log do aparelho em tempo real, com filtro por app, n\u00edvel e texto", self.abre_logcat_vivo)
         self.bt_log = self._ferramenta(col, "logcat", "Exportar logcat", "Exportar logcat|Salva em arquivo o log dos \u00faltimos 2, 5 ou 10 minutos", self.menu_logcat)
         self.bt_painel = self._ferramenta(col, "aparelho", "App e aparelho", "App e aparelho|Vers\u00e3o de qualquer app, abrir, parar, limpar dados, permiss\u00f5es e preparo para automa\u00e7\u00e3o", self.abre_painel)
         self.bt_arq = self._ferramenta(col, "arquivos", "Arquivos", "Arquivos|Pastas do aparelho: baixar, enviar, abrir e excluir", self.abre_arquivos)
@@ -2434,7 +2469,7 @@ class App:
         Dica(self.combo, "Aparelho", "Abra a lista e clique com o bot\u00e3o direito num aparelho para mais op\u00e7\u00f5es")
         self.bt_ip = visual.Botao(topo, "rede", comando=self.conectar_ip, largura=36, altura=30, cor_icone=visual.AZUL)
         self.bt_ip.pack(side="left", padx=(6, 0))
-        Dica(self.bt_ip, "Conectar pelo Wi-Fi", "Conecta um aparelho pela rede. O endere\u00e7o fica salvo e \u00e9 reconectado sozinho")
+        Dica(self.bt_ip, "Conectar pelo Wi-Fi", "Pelo IP ou pareando com c\u00f3digo (Android 11+). O endere\u00e7o fica salvo e \u00e9 reconectado sozinho")
         self.cb_cap = ttk.Combobox(topo, state="readonly", width=16, values=list(MODOS_CAPTURA))
         self.cb_cap.pack(side="left", padx=(8, 0))
         self.cb_cap.set(next((k for k, v in MODOS_CAPTURA.items() if v == (cap.modo, cap.perfil)), "Quadros (leve)"))
@@ -2462,6 +2497,7 @@ class App:
         self.sel_painel = tk.Frame(centro, bg=BG2)
 
         self.rodape = visual.Rodape(centro, "Vision %s" % VERSAO)
+        self.root.after(500, lambda: arrastar.aceitar(self.root, self.soltou_no_espelho))  # APK solto no espelho instala
         self.rodape.pack(fill="x", pady=(6, 0))
 
         root.bind("<Key>", self.tecla_digitada)
@@ -2469,6 +2505,7 @@ class App:
         root.bind("<F11>", lambda e: self.tela_cheia())
         root.bind("<F9>", lambda e: self.alterna_lateral())
         root.bind("<F6>", lambda e: self.alterna_seletor())
+        root.bind("<F8>", lambda e: self.reportar_bug())
         root.bind("<Configure>", self.mudou_tamanho)
         root.bind("<Unmap>", lambda e: setattr(self.cap, "ativo", False) if e.widget is root else None)
         root.bind("<Map>", lambda e: setattr(self.cap, "ativo", not self.pausado) if e.widget is root else None)
@@ -2537,11 +2574,12 @@ class App:
         for b in (self.bt_instala, self.bt_desinstala):
             b.configure(state="normal")
 
-    def instalar_apk(self):
+    def instalar_apk(self, arqs=None):
         serial = self._serial_ou_aviso()
         if not serial:
             return
-        arqs = filedialog.askopenfilenames(title="Escolha a APK (ou as APKs de um app dividido)", filetypes=[("APK", "*.apk"), ("Todos os arquivos", "*.*")])
+        if arqs is None:
+            arqs = filedialog.askopenfilenames(title="Escolha a APK (ou as APKs de um app dividido)", filetypes=[("APK", "*.apk"), ("Todos os arquivos", "*.*")])
         if not arqs:
             return
         arqs = list(arqs)
@@ -2586,11 +2624,29 @@ class App:
             return None
         return ["-d"] if mudanca == "downgrade" else []
 
+    def soltou_no_espelho(self, caminhos):
+        """Arquivos soltos do Explorer na janela principal: APK instala (com a confirmacao de versao);
+        outros arquivos podem ir para a pasta Download do aparelho."""
+        self.root.lift()
+        apks = [c for c in caminhos if c.lower().endswith(".apk") and os.path.isfile(c)]
+        outros = [c for c in caminhos if c not in apks and os.path.exists(c)]
+        if apks:
+            self.fila_apks = grupos_de_apks(apks)
+            self.instalar_apk(self.fila_apks.pop(0))
+        elif outros and self.cap.serial:
+            nomes = "\n".join(os.path.basename(c.rstrip("/\\")) for c in outros[:8])
+            if messagebox.askyesno("Enviar para o aparelho", "Enviar para /sdcard/Download de %s?\n\n%s" % (self._nome_aparelho(self.cap.serial), nomes), parent=self.root):
+                self.tarefa("enviando %d item(ns) para /sdcard/Download..." % len(outros), ["push"] + outros + ["/sdcard/Download/"],
+                            lambda rc, saida: (self._fim_tarefa(), self.aviso_rapido("enviado para /sdcard/Download" if rc == 0 else "falhou: %s" % resumo_texto(saida, 80), 6)))
+
     def _apos_instalar(self, rc, saida, base, arqs, nome):
         self._fim_tarefa()
         if rc == 0 and "Success" in saida:
             self.aviso_rapido("instalado: " + nome)
-            return messagebox.showinfo("Instalar APK", "Instalado com sucesso:\n%s" % nome)
+            messagebox.showinfo("Instalar APK", "Instalado com sucesso:\n%s" % nome)
+            if getattr(self, "fila_apks", None):  # varios apps soltos de uma vez: o proximo
+                self.root.after(200, lambda: self.instalar_apk(self.fila_apks.pop(0)))
+            return
         if "VERSION_DOWNGRADE" in saida:
             if messagebox.askyesno("Instalar APK", "O aparelho já tem uma versão MAIS NOVA desse app.\nInstalar mesmo assim (downgrade)?"):
                 return self.tarefa("instalando (downgrade) %s..." % nome, base + ["-r", "-d"] + arqs, lambda r, s: self._apos_instalar(r, s, base, arqs, nome))
@@ -2688,6 +2744,33 @@ class App:
             return messagebox.showinfo("Desinstalar APK", "Desinstalado:\n%s" % "\n".join(pacotes))
         messagebox.showerror("Desinstalar APK", "Resultado por pacote:\n\n%s" % (saida[-800:] or "sem detalhes"))
 
+    def pacote_em_foco(self, serial=None):
+        """Pacote do app em primeiro plano no aparelho (ou "")."""
+        try:
+            _, out, _ = rodar([self.cap.adb, "-s", serial or self.cap.serial, "shell", diagnostico_video.COMANDO_FOCO], timeout=10)
+            m = re.search(r"##pkg (\S+)", out)
+            return m.group(1) if m else ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def abre_logcat_vivo(self):
+        if not self.cap.serial:
+            return messagebox.showwarning("Vision", "Nenhum aparelho selecionado.")
+        if self.logvivo is not None:
+            try:
+                self.logvivo.win.deiconify()
+                return self.logvivo.win.lift()
+            except tk.TclError:
+                self.logvivo = None
+        self.root.configure(cursor="watch")
+        self.root.update_idletasks()
+        try:
+            pkg = self.pacote_em_foco()
+        finally:
+            self.root.configure(cursor="")
+        self.logvivo = janela_logcat.JanelaLogcat(self.root, self.cap.adb, self.cap.serial, rodar, SEM_JANELA, pkg or None,
+                                                  icone=aplica_icone, ao_fechar=lambda: setattr(self, "logvivo", None))
+
     def menu_logcat(self):
         m = tk.Menu(self.root, tearoff=0, bg=BG2, fg=FG, activebackground=ACENTO, activeforeground="#ffffff", bd=0)
         for n in JANELAS_LOG:
@@ -2731,15 +2814,17 @@ class App:
                 pass
 
     def conectar_ip(self):
-        ultimo = (self.config.get("ips") or [""])[0]
-        txt = simpledialog.askstring("Conectar por IP", "Endereco do aparelho (IP ou IP:porta; a porta padrão e 5555):", initialvalue=ultimo, parent=self.root)
-        if not txt:
-            return
-        txt = txt.strip()
-        if not RX_IP.match(txt):
-            return messagebox.showerror("Conectar por IP", "Endereco inválido: %s\nUse algo como 192.168.1.20 ou 192.168.1.20:5555" % txt)
-        if ":" not in txt:
-            txt += ":5555"
+        janela_wifi.JanelaWifi(self.root, self.cap.adb, rodar, self.config, self._conecta_endereco, self._pareado, icone=aplica_icone)
+
+    def _pareado(self, endereco):
+        """Pareamento por codigo conectou: o endereco entra na lista dos salvos (reconecta sozinho)."""
+        ips = [x for x in (self.config.get("ips") or []) if x != endereco]
+        self.config["ips"] = ([endereco] + ips)[:5]
+        salvar_config(self.config)
+        self.cap.ips = list(self.config["ips"])
+        self.aviso_rapido("pareado e conectado em %s" % endereco, 5)
+
+    def _conecta_endereco(self, txt):
         self.ocupado = "conectando em %s..." % txt
 
         def trabalho():
@@ -2862,8 +2947,9 @@ class App:
             g, self.cap.gravacao = self.cap.gravacao, None
             g.parar()
             g.thread.join(timeout=20)
+        self._devolve_toques(esperar=True)
         self.cap.parar = True
-        for filha in (self.painel, self.arq, self.mem):
+        for filha in (self.painel, self.arq, self.mem, self.logvivo):
             try:
                 if filha is not None:
                     filha.fechar()
@@ -3081,6 +3167,100 @@ class App:
                 continue  # ao conectar so anota o que ja estava la; e nao devolve o que veio do PC
             self.root.after(0, lambda t=txt: self._copiado_do_aparelho(t, False))
 
+    # ---- reportar bug
+    def reportar_bug(self):
+        """Guarda AGORA a tela, os ultimos segundos de video, o logcat e os dados do aparelho (o momento do
+        bug) e abre a janela para descrever. O relatorio e montado quando o usuario clica em Gerar."""
+        serial = self.cap.serial
+        if not serial:
+            return messagebox.showwarning("Vision", "Nenhum aparelho selecionado.")
+        c = janela_bug.Coleta()
+        c.t_clique = time.monotonic()
+        c.quadros = self.cap.recentes.congela() if self.cap.recentes is not None else []
+        c.temp = tempfile.mkdtemp(prefix="vision-bug-")
+        c.logcat = None
+
+        def trabalho():
+            adb = self.cap.adb
+            try:
+                rc, out, _ = rodar([adb, "-s", serial, "exec-out", "screencap -p"], timeout=20, binario=True)
+                if rc == 0 and out[:4] == b"\x89PNG":
+                    c.print_png = out
+                else:
+                    c.erros.append("sem print")
+            except Exception:  # noqa: BLE001
+                c.erros.append("sem print")
+            try:
+                _, out, _ = rodar([adb, "-s", serial, "shell", janela_bug.COMANDO_APARELHO], timeout=15)
+                c.props = janela_bug.le_getprop(out)
+            except Exception:  # noqa: BLE001
+                pass
+            c.pacote = self.pacote_em_foco(serial)
+            if c.pacote:
+                v = versoes_no_aparelho(adb, serial, [c.pacote]).get(c.pacote, (None, None))
+                c.versao_app = "" if v[0] is False else texto_versao(*v)
+            try:
+                c.logcat, _, _ = exportar_logcat(adb, serial, janela_bug.MINUTOS_LOGCAT, c.temp)
+            except Exception:  # noqa: BLE001
+                c.erros.append("sem logcat")
+            c.pronto.set()
+
+        threading.Thread(target=trabalho, daemon=True).start()
+        janela_bug.JanelaBug(self.root, self.config, self._nome_aparelho(serial), c, lambda d: self._gera_bug(c, serial, d), icone=aplica_icone)
+
+    def _gera_bug(self, c, serial, dados):
+        salvar_config(self.config)
+        if self.config.get("guardar_recentes", True) and self.cap.recentes is None:
+            self.cap.recentes = recentes.UltimosSegundos()
+        elif not self.config.get("guardar_recentes", True) and self.cap.recentes is not None:
+            self.cap.recentes.ativo = False
+            self.cap.recentes = None
+        self.aviso_rapido("montando o relat\u00f3rio do bug\u2026", 30)
+        nome_ap = self._nome_aparelho(serial)
+
+        def trabalho():
+            c.pronto.wait(60)
+            agora = datetime.datetime.now()
+            pasta = os.path.join(dados["pasta"], janela_bug.nome_pasta(dados["titulo"], agora))
+            erros, anexos = list(c.erros), []
+            try:
+                os.makedirs(pasta, exist_ok=True)
+                if dados["print"] and c.print_png:
+                    with open(os.path.join(pasta, "print.png"), "wb") as f:
+                        f.write(c.print_png)
+                    anexos.append("print.png")
+                if dados["video"] and len(c.quadros) > 1:
+                    try:
+                        recentes.salva_mp4(c.quadros, os.path.join(pasta, "ultimos-segundos.mp4"), ate=c.t_clique)
+                        anexos.append("ultimos-segundos.mp4")
+                    except Exception as e:  # noqa: BLE001
+                        erros.append("v\u00eddeo: %s" % str(e)[:80])
+                if dados["logcat"] and c.logcat and os.path.exists(c.logcat):
+                    shutil.move(c.logcat, os.path.join(pasta, "logcat.txt"))
+                    anexos.append("logcat.txt")
+                ambiente = janela_bug.ambiente_de(c.props, nome_ap, c.pacote, c.versao_app, agora, VERSAO) if dados["info"] else []
+                texto = janela_bug.texto_bug(dados["titulo"], dados["campos"], ambiente, anexos)
+                with open(os.path.join(pasta, "bug.md"), "w", encoding="utf-8") as f:
+                    f.write(texto)
+                zipado = janela_bug.compacta(pasta)
+                self.bugs_prontos.append((pasta, zipado, texto, erros))
+            except Exception as e:  # noqa: BLE001
+                self.bugs_prontos.append((pasta, None, "", erros + [str(e)[:160]]))
+            finally:
+                shutil.rmtree(c.temp, ignore_errors=True)
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _bug_pronto(self, pasta, zipado, texto, erros):
+        if not zipado:
+            return messagebox.showerror("Reportar bug", "N\u00e3o consegui montar o relat\u00f3rio:\n\n%s" % "\n".join(erros), parent=self.root)
+        self.root.clipboard_clear()
+        self.root.clipboard_append(texto)
+        falta = (" (sem: %s)" % ", ".join(erros)) if erros else ""
+        self.aviso_rapido("relat\u00f3rio pronto: o texto do card est\u00e1 na \u00e1rea de transfer\u00eancia%s" % falta, 10)
+        if os.name == "nt":
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(zipado)])
+
     # ---- gravar a tela (.mp4 ou .gif)
     def menu_gravar(self):
         if self.cap.gravacao is not None:
@@ -3089,9 +3269,11 @@ class App:
             return messagebox.showwarning("Vision", "Nenhum aparelho selecionado.")
         janela_gravacao.JanelaGravacao(self.root, self.config, self.cap.serial, self.iniciar_gravacao, icone=aplica_icone)
 
-    def iniciar_gravacao(self, formato, caminho, abrir_pasta=True):
+    def iniciar_gravacao(self, formato, caminho, abrir_pasta=True, toques=False):
         salvar_config(self.config)  # formato, pasta e "abrir a pasta" escolhidos na janela
         self.abrir_pasta_gravacao = abrir_pasta
+        if toques:
+            self._liga_toques(self.cap.serial)
         self.cap.gravacao = gravacao.Gravacao(caminho, formato,
                                               lambda c, e, m: self.gravacoes_prontas.append((c, e, m)))
         if self.cap._av is not None or self.cap.frame is not None:
@@ -3099,17 +3281,41 @@ class App:
         self.bt_grava.define(texto="Parar gravação", ativo=True)
         self.aviso_rapido("gravando em %s: clique em Parar gravação para salvar" % formato.upper(), 4)
 
+    def _liga_toques(self, serial):
+        """Liga o "mostrar toques" do Android durante a gravacao, guardando o valor de antes."""
+        def trabalho():
+            try:
+                _, out, _ = rodar([self.cap.adb, "-s", serial, "shell", "settings get system show_touches"], timeout=10)
+                antes = out.strip() if out.strip() in ("0", "1") else "0"
+                if antes != "1":
+                    rodar([self.cap.adb, "-s", serial, "shell", "settings put system show_touches 1"], timeout=10)
+                self.toques_antes = (serial, antes)
+            except Exception:  # noqa: BLE001
+                self.toques_antes = None
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _devolve_toques(self, esperar=False):
+        info, self.toques_antes = getattr(self, "toques_antes", None), None
+        if not info or info[1] == "1":
+            return
+        t = threading.Thread(target=lambda: rodar([self.cap.adb, "-s", info[0], "shell", "settings put system show_touches %s" % info[1]], timeout=10), daemon=True)
+        t.start()
+        if esperar:
+            t.join(10)
+
     def parar_gravacao(self):
         g, self.cap.gravacao = self.cap.gravacao, None
         if g is None:
             return
         g.parar()
+        self._devolve_toques()
         self.bt_grava.define(texto="Salvando…", ativo=False)
         self.aviso_rapido("salvando a gravação…", 30)
 
     def _gravacao_pronta(self, caminho, erro, motivo):
         if self.cap.gravacao is not None and self.cap.gravacao.caminho == caminho:
             self.cap.gravacao = None  # parou sozinha (limite do GIF)
+        self._devolve_toques()
         self.bt_grava.define(texto="Gravar tela", ativo=False)
         if erro:
             return self.aviso_rapido("a gravação falhou: %s" % erro, 8)
@@ -3683,6 +3889,8 @@ class App:
         if txt is not None:
             self.rodape.mensagem(txt, cor)
         self.root.title("Vision - %s%s" % (cap.serial or "sem aparelho", " (pausado)" if self.pausado else ""))
+        while self.bugs_prontos:
+            self._bug_pronto(*self.bugs_prontos.pop(0))
         while self.gravacoes_prontas:
             self._gravacao_pronta(*self.gravacoes_prontas.pop(0))
         self.root.after(400, self.rodape_tick)

@@ -46,7 +46,7 @@ def caminho_final(pasta, nome, formato):
 
 
 class JanelaGravacao:
-    """`ao_iniciar(formato, caminho, abrir_pasta)` quando o usuario clica em Iniciar gravacao."""
+    """`ao_iniciar(formato, caminho, abrir_pasta, toques)` quando o usuario clica em Iniciar gravacao."""
 
     def __init__(self, raiz, config, serial, ao_iniciar, icone=None):
         self.config, self.ao_iniciar = config, ao_iniciar
@@ -63,6 +63,7 @@ class JanelaGravacao:
         self.var_pasta = tk.StringVar(value=pasta if os.path.isdir(pasta) else pasta_padrao())
         self.var_nome = tk.StringVar(value=nome_sugerido(serial))
         self.var_abrir = tk.BooleanVar(value=config.get("abrir_pasta_gravacao", True))
+        self.var_toques = tk.BooleanVar(value=config.get("toques_gravacao", True))
 
         tk.Label(w, text="Gravar tela", bg=visual.BG, fg=visual.FG, font=(f["forte"], 14)).pack(anchor="w", padx=20, pady=(18, 0))
         tk.Label(w, text="Grava o que aparece no espelho de %s at\u00e9 voc\u00ea clicar em Parar grava\u00e7\u00e3o." % (serial or "aparelho"),
@@ -88,7 +89,9 @@ class JanelaGravacao:
         ent.pack(side="left", fill="x", expand=True, ipady=2)
         self.lb_ext = tk.Label(ln, text="", bg=visual.BG, fg=visual.FG2, font=(f["texto"], 10), width=5, anchor="w")
         self.lb_ext.pack(side="left", padx=(6, 0))
-        ttk.Checkbutton(w, text="Abrir a pasta quando a grava\u00e7\u00e3o for salva", variable=self.var_abrir).pack(anchor="w", padx=20, pady=(12, 0))
+        ttk.Checkbutton(w, text="Mostrar os toques no v\u00eddeo (o aparelho desenha um c\u00edrculo onde se toca)",
+                        variable=self.var_toques).pack(anchor="w", padx=20, pady=(12, 0))
+        ttk.Checkbutton(w, text="Abrir a pasta quando a grava\u00e7\u00e3o for salva", variable=self.var_abrir).pack(anchor="w", padx=20, pady=(6, 0))
 
         tk.Frame(w, bg=visual.BORDA, height=1).pack(fill="x", pady=(16, 0))
         botoes = tk.Frame(w, bg=visual.BG)
@@ -162,6 +165,7 @@ class JanelaGravacao:
             from tkinter import messagebox
             if not messagebox.askyesno("Gravar tela", "J\u00e1 existe %s.\n\nSubstituir?" % os.path.basename(caminho), icon="warning", parent=self.win):
                 return
-        self.config.update(formato_gravacao=self.formato, pasta_gravacao=pasta, abrir_pasta_gravacao=bool(self.var_abrir.get()))
+        self.config.update(formato_gravacao=self.formato, pasta_gravacao=pasta, abrir_pasta_gravacao=bool(self.var_abrir.get()),
+                           toques_gravacao=bool(self.var_toques.get()))
         self.win.destroy()
-        self.ao_iniciar(self.formato, caminho, bool(self.var_abrir.get()))
+        self.ao_iniciar(self.formato, caminho, bool(self.var_abrir.get()), bool(self.var_toques.get()))

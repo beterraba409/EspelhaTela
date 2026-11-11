@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.2 - reportar bug, logcat ao vivo, pareamento por Wi-Fi
+
+- **Reportar bug** (Ferramentas ou F8): no clique, o Vision guarda a tela em resolução total, o vídeo dos **últimos 30 s** do espelho, o logcat dos últimos 5 minutos e os dados do aparelho e do app em primeiro plano (com a versão). Você preenche Título, Descrição, Teste realizado, Resultado esperado e Resultado obtido, e ele monta uma pasta em `Documentos\Vision\Bugs` com `print.png`, `ultimos-segundos.mp4`, `logcat.txt` e `bug.md`, mais um `.zip` para anexar no Jira. O texto do card vai para a área de transferência. Para ter o vídeo de antes do clique, o Vision guarda sempre os últimos 30 s em quadros reduzidos (cerca de 10 MB; dá para desligar na própria janela).
+- **Logcat ao vivo** em janela própria: tempo real com cores por nível, filtro pelo app (já vem o que está na tela; segue o app mesmo se ele reiniciar), nível mínimo e busca com destaque; Pausar, Limpar e Salvar (com os filtros).
+- **Conectar pelo Wi-Fi** virou uma janela com duas opções: **Pelo IP** (como antes) e **Parear com código** (Android 11+, Depuração por Wi-Fi): IP e porta de pareamento + código de 6 dígitos; a porta de conexão é achada sozinha na rede.
+- **Toques visíveis na gravação**: a janela Gravar tela tem "Mostrar os toques no vídeo" (liga o recurso do Android durante a gravação e devolve como estava no fim).
+- **Soltar APK no espelho**: arrastar um `.apk` do Explorer para a janela principal instala, com a confirmação de versão de sempre (vários apps instalam um após o outro; as partes de um app dividido vão juntas). Outros arquivos podem ir para `/sdcard/Download`.
+- MP4 (gravação e Reportar bug) com a duração certa em qualquer player, mesmo com a tela parada por um tempo.
+
 ## 2.1 - janela de gravação
 
 - **Gravar tela** abre uma janela própria: escolha entre **MP4** (vídeo, 30 quadros/s, sem limite) e **GIF** (animação, 10 quadros/s, até 60 s) em cartões com o que cada um faz; **pasta** (botão Alterar…) e **nome do arquivo** escolhidos ali; opção de abrir a pasta quando salvar. Lembra o formato e a pasta da última vez.

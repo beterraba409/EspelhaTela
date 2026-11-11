@@ -15,6 +15,7 @@ FPS_MP4 = 30
 FPS_GIF = 10
 LARGURA_GIF = 360
 LIMITE_GIF = 60  # s: GIF fica pesado rapido (e vive na memoria ate salvar)
+REPETE_MS = 500  # MP4: num trecho de tela parada, o ultimo quadro e repetido a cada meio segundo
 
 
 def par(n):
@@ -103,7 +104,7 @@ class Gravacao:
     def _grava_mp4(self):
         import av
         saida = stream = None
-        ultimo_pts = -1
+        ultimo_pts, anterior = -1, None
         try:
             for fr, t in self._itens():
                 if not isinstance(fr, av.VideoFrame):
@@ -116,9 +117,15 @@ class Gravacao:
                     stream.pix_fmt = "yuv420p"
                     stream.codec_context.time_base = fractions.Fraction(1, 1000)
                 pts = max(int(t * 1000), ultimo_pts + 1)
+                if anterior is not None:  # tela parada: repete o quadro, para a duracao do MP4 ficar certa em qualquer player
+                    for extra in range(ultimo_pts + REPETE_MS, pts - REPETE_MS // 2, REPETE_MS):
+                        rep = anterior.reformat(format="yuv420p")
+                        rep.pts, rep.time_base = extra, fractions.Fraction(1, 1000)
+                        for pkt in stream.encode(rep):
+                            saida.mux(pkt)
                 novo = fr.reformat(width=stream.width, height=stream.height, format="yuv420p")
                 novo.pts, novo.time_base = pts, fractions.Fraction(1, 1000)
-                ultimo_pts = pts
+                ultimo_pts, anterior = pts, novo
                 for pkt in stream.encode(novo):
                     saida.mux(pkt)
                 self.gravados += 1

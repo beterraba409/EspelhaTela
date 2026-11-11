@@ -45,6 +45,8 @@ ICONES = {
     "arquivos": ("", "\U0001F4C1"),
     "memoria": ("", "\U0001F4CA"),
     "gravar": ("", "⏺"),
+    "logcat_vivo": ("", "\U0001F4C8"),
+    "bug": ("", "\U0001F41E"),
     "atualizar": ("", "↻"),
     "rede": ("", "+"),
     "janela": ("", "↗"),

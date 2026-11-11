@@ -59,17 +59,19 @@ python espelha_tela.py
 | 🎯 | **Seletor** (F6) | O mouse destaca o elemento sob ele, e o clique escolhe o elemento em vez de tocar no aparelho. As sugestões são `id:` (o `resource-id`; no React Native, o `testID`), o id do elemento clicável que o contém, `text:`, accessibilityLabel, `assertVisible` e `point:`. |
 | 📱 | **App e aparelho** | Para qualquer app instalado: versão, datas, PID, abrir, parar, reiniciar, limpar dados, conceder permissões e marcar como **★ favorito**. Do aparelho: modelo, Android, bateria, IP e ANDROID_ID. |
 | 🤖 | **Preparar para automação** | Desliga as animações, mantém a tela ligada e trava a rotação. Guarda os valores antigos para restaurar com um clique. |
-| 📦 | **Instalar / Desinstalar APK** | `adb install -r` com tratamento de downgrade e desinstalação de vários pacotes de uma vez. |
+| 📦 | **Instalar / Desinstalar APK** | `adb install -r` com tratamento de downgrade e desinstalação de vários pacotes de uma vez. Também dá para **soltar o APK em cima do espelho**. |
 | 📁 | **Arquivos** | Navegar, baixar e enviar com barra de progresso e Cancelar, **arrastar arquivos do Explorer** para a pasta aberta, abrir no PC, criar pasta, renomear e excluir (em `/sdcard`, `/storage` e `/data/local/tmp`). |
-| 🎬 | **Gravar tela** | Grava o espelho em **MP4** ou **GIF** (até 60 s) em `Vídeos\Vision`. |
+| 🎬 | **Gravar tela** | Grava o espelho em **MP4** ou **GIF** (até 60 s), com os **toques visíveis** se quiser, na pasta e com o nome que você escolher. |
 | 📊 | **Memória** | Gerenciador de tarefas com RSS por processo, PSS sob demanda, variação desde o início, gráficos e exportação para CSV. |
+| 🐞 | **Reportar bug** (F8) | Print, vídeo dos últimos 30 s, logcat e dados do aparelho/app numa pasta + `.zip`, com o texto do card do Jira (Descrição, Teste realizado, Resultado esperado e obtido) na área de transferência. |
+| 📈 | **Logcat ao vivo** | Log em tempo real com filtro por app, nível e busca; pausar, limpar e salvar. |
 | 📜 | **Exportar logcat** | O log dos últimos 2, 5 ou 10 minutos num arquivo, usando a hora do aparelho. |
-| 🌐 | **+ IP** | `adb connect` pela rede. O endereço fica salvo e é reconectado sozinho. |
+| 🌐 | **Conectar pelo Wi-Fi** | Pelo IP (`adb connect`) ou **pareando com código** (Android 11+). O endereço fica salvo e é reconectado sozinho. |
 | 🔌 | **Aviso de adb e porta** | Detecta um `adb.cmd` ou `ADB_SERVER_PORT` apontando para um servidor sem aparelhos e oferece **Usar a porta N**. |
 | 📋 | **Copiar e colar** | **Ctrl+V** cola no aparelho o texto copiado no PC, com acentos. **Ctrl+C** copia a seleção do aparelho para o PC. O que um app copiar no aparelho (como o botão de copiar o serial) chega sozinho ao PC. **Botão direito** na tela copia o texto sob o mouse (até o que não dá para selecionar, como um serial) ou todo o texto da tela. |
 | 📷 | **Captura e tela cheia** | PNG em `Imagens\Vision` (Ctrl+S) e tela cheia (F11). |
 
-**Atalhos:** `Ctrl+V` cola no aparelho · `Ctrl+C` copia do aparelho · `F6` liga o seletor · `F9` mostra/oculta a barra lateral · `F11` tela cheia · `Ctrl+S` salva a captura · `Esc` sai do seletor.
+**Atalhos:** `Ctrl+V` cola no aparelho · `Ctrl+C` copia do aparelho · `F6` liga o seletor · `F8` reportar bug · `F9` mostra/oculta a barra lateral · `F11` tela cheia · `Ctrl+S` salva a captura · `Esc` sai do seletor.
 
 ## 🎯 Seletor para o Maestro: exemplo
 

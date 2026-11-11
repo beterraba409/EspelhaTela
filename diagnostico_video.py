@@ -180,10 +180,12 @@ def codificador_em_uso(saida, conhecidos):
 # uma amostra a cada 10 s de uso: app em primeiro plano (a janela em foco ou, se ela nao for de app, o app
 # em primeiro plano), quadros que ele desenhou desde a amostra anterior
 # (o reset zera a contagem) e o processador do screenrecord, do surfaceflinger (desenho da tela) e do app
-COMANDO_AMOSTRA = (
+COMANDO_FOCO = (  # so o app em primeiro plano: "##pkg <pacote>"
     r'''f=$(dumpsys window 2>/dev/null | grep -E 'mCurrentFocus|mFocusedApp'); '''
     r'''p=$(echo "$f" | sed -n 's|.* u0 \([^/ ]*\)/.*|\1|p' | head -1); '''
     r'''echo "##pkg $p"; '''
+)
+COMANDO_AMOSTRA = COMANDO_FOCO + (
     r'''if [ -n "$p" ]; then dumpsys gfxinfo "$p" reset 2>/dev/null | grep -E 'Total frames rendered|Janky frames'; fi; '''
     r'''echo '##top'; '''
     r'''top -b -n 1 -d 1 -s 1 -o %CPU,ARGS 2>/dev/null | grep -E "screenrecord|surfaceflinger|${p:-nada}" | head -8'''

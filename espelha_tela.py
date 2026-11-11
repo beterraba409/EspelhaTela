@@ -73,8 +73,9 @@ import diagnostico_video  # noqa: E402  (registro das travadas do video)
 import arrastar  # noqa: E402  (arquivos soltos do Explorer na janela)
 import transferencia  # noqa: E402  (adb pull/push com progresso e cancelamento)
 import gravacao  # noqa: E402  (gravar a tela em .mp4 ou .gif)
+import janela_gravacao  # noqa: E402  (janela de escolha do formato e do destino da gravacao)
 
-VERSAO = "2.0"
+VERSAO = "2.1"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -3086,18 +3087,12 @@ class App:
             return self.parar_gravacao()
         if not self.cap.serial:
             return messagebox.showwarning("Vision", "Nenhum aparelho selecionado.")
-        m = tk.Menu(self.root, tearoff=0, bg=BG2, fg=FG, activebackground=ACENTO, activeforeground="#ffffff", bd=0)
-        m.add_command(label="Gravar em MP4 (vídeo)", command=lambda: self.iniciar_gravacao("mp4"))
-        m.add_command(label="Gravar em GIF (animação, até %d s)" % gravacao.LIMITE_GIF, command=lambda: self.iniciar_gravacao("gif"))
-        b = self.bt_grava
-        m.tk_popup(b.winfo_rootx() + 12, b.winfo_rooty() + b.winfo_height())
+        janela_gravacao.JanelaGravacao(self.root, self.config, self.cap.serial, self.iniciar_gravacao, icone=aplica_icone)
 
-    def iniciar_gravacao(self, formato):
-        pasta = os.path.join(os.path.expanduser("~"), "Videos", "Vision")
-        os.makedirs(pasta, exist_ok=True)
-        nome = "gravacao-%s-%s.%s" % (re.sub(r"[^A-Za-z0-9._-]", "_", self.cap.serial or "aparelho"),
-                                        datetime.datetime.now().strftime("%Y%m%d-%H%M%S"), formato)
-        self.cap.gravacao = gravacao.Gravacao(os.path.join(pasta, nome), formato,
+    def iniciar_gravacao(self, formato, caminho, abrir_pasta=True):
+        salvar_config(self.config)  # formato, pasta e "abrir a pasta" escolhidos na janela
+        self.abrir_pasta_gravacao = abrir_pasta
+        self.cap.gravacao = gravacao.Gravacao(caminho, formato,
                                               lambda c, e, m: self.gravacoes_prontas.append((c, e, m)))
         if self.cap._av is not None or self.cap.frame is not None:
             self.cap.gravacao.quadro(self.cap._av if self.cap._av is not None else self.cap.frame)  # a tela como esta agora
@@ -3120,7 +3115,7 @@ class App:
             return self.aviso_rapido("a gravação falhou: %s" % erro, 8)
         extra = " (limite de %d s do GIF)" % gravacao.LIMITE_GIF if motivo == "limite" else ""
         self.aviso_rapido("gravação salva%s: %s" % (extra, caminho), 8)
-        if os.name == "nt" and os.path.exists(caminho):
+        if getattr(self, "abrir_pasta_gravacao", True) and os.name == "nt" and os.path.exists(caminho):
             subprocess.Popen(["explorer", "/select,", os.path.normpath(caminho)])
 
     def _copiado_do_aparelho(self, txt, falhou):

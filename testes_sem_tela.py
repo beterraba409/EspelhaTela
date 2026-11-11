@@ -662,5 +662,21 @@ class GravarTela(unittest.TestCase):
         self.assertEqual(G.nome_do_tempo(75.4), "01:15")
 
 
+class JanelaDeGravacao(unittest.TestCase):
+    def test_extensao_segue_o_formato(self):
+        import janela_gravacao as J
+        p = os.path.join("C:" + os.sep, "videos")
+        self.assertEqual(J.caminho_final(p, "teste.mp4", "gif"), os.path.join(p, "teste.gif"))
+        self.assertEqual(J.caminho_final(p, "teste", "mp4"), os.path.join(p, "teste.mp4"))
+        self.assertEqual(J.caminho_final(p, "a:b?c", "mp4"), os.path.join(p, "a_b_c.mp4"))
+        self.assertEqual(J.caminho_final(p, "   ", "gif"), os.path.join(p, "gravacao.gif"))
+
+    def test_nome_sugerido(self):
+        import datetime
+        import janela_gravacao as J
+        self.assertEqual(J.nome_sugerido("192.168.1.6:5555", datetime.datetime(2026, 11, 11, 15, 48, 34)),
+                         "gravacao-192.168.1.6_5555-20261111-154834")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

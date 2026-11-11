@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.1 - janela de gravação
+
+- **Gravar tela** abre uma janela própria: escolha entre **MP4** (vídeo, 30 quadros/s, sem limite) e **GIF** (animação, 10 quadros/s, até 60 s) em cartões com o que cada um faz; **pasta** (botão Alterar…) e **nome do arquivo** escolhidos ali; opção de abrir a pasta quando salvar. Lembra o formato e a pasta da última vez.
+
 ## 2.0 - vídeo sem quadro preso, gravar tela, área de transferência e arquivos
 
 - **Vídeo preso no quadro anterior (causa das "travadas" que ficavam até mexer na tela de novo)**: o decodificador só soltava um quadro quando chegava o começo do próximo. Com a tela do aparelho parada depois de uma mudança (fechar um aviso, por exemplo), o estado final ficava preso no PC, e o espelho mostrava a tela anterior até algo mudar de novo. Agora, quando o aparelho para de mandar dados por um instante, o último quadro é mostrado na hora. A mesma causa fazia a gravação "falhar sem imagem" em telas paradas.

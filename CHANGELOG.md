@@ -1,5 +1,14 @@
 # Changelog
 
+## 2.4 - Emuladores Android dentro do Vision
+
+- **Emuladores** (nova ferramenta): cria e liga Androids virtuais que aparecem no espelho do Vision como um aparelho, com todas as ferramentas (toque, Seletor, Reportar bug, Logcat, Arquivos, instalar APK soltando no espelho).
+  - **Criar emulador**: perfis **SmartPOS** (720×1280, Android 11 como o GPOS e o L400), **Celular** e **Tablet**; versão do Android 11, 13, 14, 15 ou 16; nome, memória e armazenamento. Antes de criar, verifica aceleração (WHPX), memória e disco e diz como resolver o que faltar.
+  - **Sem Android SDK no PC**: o Vision baixa o emulador e a imagem do Android direto do repositório oficial do Google (sem Java nem Android Studio), confere o checksum e continua de onde parou se a internet cair. Na primeira vez, mostra a licença do Android SDK para aceitar. Com SDK no PC, usa o que já existe (e confere se a imagem está inteira).
+  - **Janela Emuladores** (abre ao lado do espelho): ligar, desligar, espelhar, ligar num **estado salvo**, salvar o estado atual (ex.: SmartPOS ativado e logado), voltar a ele, apagar os dados, excluir. Vários ao mesmo tempo. Ligam sem janela própria e o Vision passa a espelhar o emulador quando termina de ligar; na lista de aparelhos aparecem como "Emulador · SmartPOS (Android 11)". Ao fechar, o Vision pergunta se desliga os que ele ligou.
+  - No SmartPOS, telas e automação rodam; pagamento com cartão não (não há leitor nem SDK de adquirente).
+- **Toque instantâneo no Android 14 ou mais novo**: o injetor passou a usar o `InputManagerGlobal` (o `InputManager` exige contexto de app a partir do Android 14). Vale para celulares físicos também.
+
 ## 2.3 - Configurações: escolha suas ferramentas
 
 - **Configurações** (seção Vision): um interruptor para cada ferramenta da barra lateral. Desligada, a ferramenta some do Vision, junto com o atalho de teclado dela (F6 do Seletor, F8 do Reportar bug) e o que ela faz ao soltar arquivos no espelho; ligada, volta no mesmo lugar. **Mostrar todas** liga tudo de novo. A escolha fica no `config.json` de cada usuário, então cada um monta o seu Vision.

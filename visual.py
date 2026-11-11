@@ -47,6 +47,7 @@ ICONES = {
     "gravar": ("", "⏺"),
     "logcat_vivo": ("", "\U0001F4C8"),
     "config": ("", "⚙"),
+    "emulador": ("", "\U0001F5A5"),
     "bug": ("", "\U0001F41E"),
     "atualizar": ("", "↻"),
     "rede": ("", "+"),

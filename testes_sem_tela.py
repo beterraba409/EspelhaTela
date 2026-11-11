@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adb_servidor as A  # noqa: E402
@@ -812,6 +813,144 @@ class Configuracoes(unittest.TestCase):
         self.assertEqual(C.ocultas_do_config({"ferramentas_ocultas": ["seletor", "sumiu"]}, chaves), {"seletor"})
         self.assertEqual(C.ocultas_do_config({}, chaves), set())
         self.assertEqual(C.ocultas_do_config({"ferramentas_ocultas": None}, chaves), set())
+
+
+REPO_FALSO = """<?xml version="1.0"?>
+<sdk:sdk-repository xmlns:sdk="http://schemas.android.com/sdk/android/repo/repository2/03">
+<license id="android-sdk-license" type="text">Termos de teste</license>
+<channel id="channel-0">stable</channel>
+<remotePackage path="emulator"><revision><major>37</major><minor>1</minor><micro>0</micro></revision>
+<uses-license ref="android-sdk-license"/><channelRef ref="channel-1"/>
+<archives><archive><complete><size>10</size><checksum type="sha1">aa</checksum><url>emu-beta.zip</url></complete><host-os>windows</host-os><host-arch>x64</host-arch></archive></archives></remotePackage>
+<remotePackage path="emulator"><revision><major>36</major><minor>4</minor><micro>9</micro></revision>
+<uses-license ref="android-sdk-license"/><channelRef ref="channel-0"/>
+<archives><archive><complete><size>20</size><checksum type="sha1">bb</checksum><url>emu-linux.zip</url></complete><host-os>linux</host-os></archive>
+<archive><complete><size>30</size><checksum type="sha1">cc</checksum><url>emu-win.zip</url></complete><host-os>windows</host-os><host-arch>x64</host-arch></archive></archives></remotePackage>
+<remotePackage path="system-images;android-30;google_apis;x86_64"><type-details><api-level>30</api-level><tag><id>google_apis</id></tag></type-details>
+<revision><major>16</major></revision><uses-license ref="android-sdk-license"/><channelRef ref="channel-0"/>
+<archives><archive><complete><size>40</size><checksum type="sha1">dd</checksum><url>x86_64-30_r16.zip</url></complete></archive></archives></remotePackage>
+</sdk:sdk-repository>"""
+
+
+class Emuladores(unittest.TestCase):
+    def test_repositorio_escolhe_o_estavel_do_windows(self):
+        import emulador_sdk as S
+        r = S.le_repositorio(REPO_FALSO)
+        emu = r["pacotes"]["emulator"]
+        self.assertEqual((emu["canal"], emu["revisao"], emu["url"], emu["size"]), ("channel-0", (36, 4, 9), "emu-win.zip", 30))
+        img = r["pacotes"]["system-images;android-30;google_apis;x86_64"]
+        self.assertEqual((img["api"], img["tag"], img["url"]), (30, "google_apis", "x86_64-30_r16.zip"))
+        self.assertEqual(r["licencas"]["android-sdk-license"], "Termos de teste")
+
+    def test_imagem_incompleta_sem_kernel(self):
+        import emulador_sdk as S
+        with tempfile.TemporaryDirectory() as d:
+            p = S.pasta_imagem(d, 30)
+            os.makedirs(p)
+            open(os.path.join(p, "system.img"), "wb").close()
+            self.assertFalse(S.imagem_completa(d, 30))
+            open(os.path.join(p, "kernel-ranchu"), "wb").close()
+            self.assertTrue(S.imagem_completa(d, 30))
+
+    def test_download_continua_e_confere_o_checksum(self):
+        import hashlib
+        import http.server
+        import emulador_sdk as S
+        dados = os.urandom(300000)
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                ini = int(self.headers.get("Range", "bytes=0-")[6:].split("-")[0] or 0)
+                self.send_response(206 if ini else 200)
+                self.send_header("Content-Length", str(len(dados) - ini))
+                self.end_headers()
+                self.wfile.write(dados[ini:])
+
+            def log_message(self, *a):
+                pass
+
+        srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        url = "http://127.0.0.1:%d/x.zip" % srv.server_port
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                destino = os.path.join(d, "x.zip")
+                with open(destino + ".part", "wb") as f:
+                    f.write(dados[:100000])  # tentativa anterior interrompida
+                vistos = []
+                S.baixa(url, destino, hashlib.sha1(dados).hexdigest(), len(dados), lambda f, t: vistos.append(f))
+                self.assertEqual(open(destino, "rb").read(), dados)
+                self.assertGreaterEqual(vistos[0], 100000)  # continuou de onde parou
+                os.remove(destino)
+                with self.assertRaises(ValueError):
+                    S.baixa(url, destino, "0" * 40, len(dados))
+                self.assertFalse(os.path.exists(destino + ".part"))  # corrompido: apaga
+        finally:
+            srv.shutdown()
+
+    def test_extrai_tira_a_pasta_de_cima(self):
+        import emulador_sdk as S
+        with tempfile.TemporaryDirectory() as d:
+            z = os.path.join(d, "img.zip")
+            with zipfile.ZipFile(z, "w") as zf:
+                zf.writestr("x86_64/system.img", "s")
+                zf.writestr("x86_64/data/a.txt", "a")
+            S.extrai(z, os.path.join(d, "destino"))
+            self.assertEqual(sorted(os.listdir(os.path.join(d, "destino"))), ["data", "system.img"])
+
+    def test_criar_listar_e_excluir_avd(self):
+        import emulador_avd as A
+        with tempfile.TemporaryDirectory() as d:
+            nome = A.sugere_nome("smartpos", 30, set())
+            self.assertEqual(nome, "vision-smartpos-android11")
+            A.cria(nome, "smartpos", 30, pasta=d)
+            cfg = A.le_ini(os.path.join(d, nome + ".avd", "config.ini"))
+            self.assertEqual((cfg["hw.lcd.width"], cfg["hw.lcd.height"], cfg["image.sysdir.1"]), ("720", "1280", "system-images\\android-30\\google_apis\\x86_64\\"))
+            with self.assertRaises(ValueError):
+                A.cria(nome, "smartpos", 30, pasta=d)
+            [a] = A.lista(d)
+            self.assertEqual((a["nome"], a["perfil"], a["api"], a["do_vision"]), (nome, "smartpos", 30, True))
+            self.assertEqual(A.sugere_nome("smartpos", 30, {nome}), nome + "-2")
+            os.makedirs(os.path.join(a["pasta"], "snapshots", "logado"))
+            os.makedirs(os.path.join(a["pasta"], "snapshots", "default_boot"))
+            self.assertEqual(A.instantaneos(a["pasta"]), ["logado"])
+            self.assertTrue(A.exclui(nome, d))
+            self.assertEqual(A.lista(d), [])
+            self.assertFalse(A.nome_valido("com espaço"))
+
+    def test_linha_de_comando_e_portas(self):
+        import emulador_proc as P
+        base = P.comando("C:/sdk", "x", 5556)
+        self.assertIn("-no-window", base)
+        self.assertEqual(base[base.index("-port") + 1], "5556")
+        self.assertIn("-no-snapshot-load", base)  # boot limpo: abrir de um estado salvo deixa o adb offline
+        self.assertNotIn("-wipe-data", base)
+        self.assertIn("-wipe-data", P.comando("C:/sdk", "x", 5556, "apagar"))
+        self.assertEqual(P.porta_livre([5554], em_uso=lambda p: p == 5556), 5558)
+
+    def test_console_do_emulador(self):
+        import emulador_proc as P
+        resposta = {"devices": "List of devices attached\nemulator-5554\tdevice\n192.168.1.6:5555\tdevice\n",
+                    "name": "vision-smartpos-android11\nOK\n",
+                    "load": "KO: Device 'cache' does not have the requested snapshot 'x'\nKO: Snapshot load failure\n"}
+
+        def rodar(cmd, timeout=0):
+            chave = "devices" if cmd[-1] == "devices" else ("name" if cmd[-1] == "name" else "load")
+            return 0, resposta[chave], ""
+
+        self.assertEqual(P.emuladores_ligados(rodar, "adb"), {"emulator-5554": "vision-smartpos-android11"})
+        with self.assertRaises(RuntimeError) as e:
+            P.carrega_estado(rodar, "adb", "emulator-5554", "x")
+        self.assertIn("Snapshot load failure", str(e.exception))
+
+    def test_nome_do_emulador_na_lista_de_aparelhos(self):
+        import espelha_tela as E
+        E.ROTULOS_EMULADOR["emulator-5554"] = "Emulador \u00b7 SmartPOS (Android 11)"
+        try:
+            self.assertTrue(E.rotulo_aparelho({"serial": "emulator-5554", "modelo": "sdk_gphone64", "estado": "device"})
+                            .startswith("emulator-5554  \u00b7  Emulador \u00b7 SmartPOS"))
+        finally:
+            E.ROTULOS_EMULADOR.clear()
 
 
 if __name__ == "__main__":

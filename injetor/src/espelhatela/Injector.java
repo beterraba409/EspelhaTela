@@ -53,7 +53,13 @@ public final class Injector {
 
     public static void main(String[] args) throws Exception {
         try {
-            Method getInstance = Class.forName("android.hardware.input.InputManager").getDeclaredMethod("getInstance");
+            Class<?> classe;
+            try {  // Android 14+: InputManager.getInstance() exige contexto de app; a injecao fica no InputManagerGlobal
+                classe = Class.forName("android.hardware.input.InputManagerGlobal");
+            } catch (ClassNotFoundException e) {
+                classe = Class.forName("android.hardware.input.InputManager");
+            }
+            Method getInstance = classe.getDeclaredMethod("getInstance");
             inputManager = getInstance.invoke(null);
             inject = inputManager.getClass().getMethod("injectInputEvent", InputEvent.class, int.class);
         } catch (Throwable t) {

@@ -79,8 +79,10 @@ import janela_logcat  # noqa: E402  (logcat ao vivo com filtros)
 import janela_bug  # noqa: E402  (reportar bug: print, video, logcat e texto do card)
 import recentes  # noqa: E402  (os ultimos 30 s do espelho na memoria)
 import janela_config  # noqa: E402  (ligar e desligar as ferramentas da barra lateral)
+import janela_emuladores  # noqa: E402  (Androids virtuais dentro do Vision)
+import emulador_avd  # noqa: E402
 
-VERSAO = "2.3"
+VERSAO = "2.4"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -211,10 +213,15 @@ ESTADOS = {"device": "", "unauthorized": "n\u00e3o autorizado", "offline": "offl
            "sideload": "em sideload", "bootloader": "em bootloader", "authorizing": "autorizando"}
 
 
+ROTULOS_EMULADOR = {}  # serial -> "Emulador · SmartPOS (Android 11)" dos emuladores conhecidos
+
+
 def rotulo_aparelho(a):
     """Como o aparelho aparece na lista: serial primeiro (o resto do programa le o serial até o espaco)."""
     partes = [a["serial"]]
-    if a.get("modelo"):
+    if ROTULOS_EMULADOR.get(a["serial"]):
+        partes.append(ROTULOS_EMULADOR[a["serial"]])
+    elif a.get("modelo"):
         partes.append(a["modelo"])
     txt = "  \u00b7  ".join(partes)
     estado = ESTADOS.get(a["estado"], a["estado"])
@@ -2388,6 +2395,14 @@ class App:
         self.clip_visto = {}  # serial -> (marca, texto) da area de transferencia do aparelho
         self.fila_apks = []  # apps soltos no espelho esperando a vez de instalar
         self.bugs_prontos = []  # (pasta, zip, texto, erros) vindos da thread do Reportar bug
+        self.emu_prontos = []  # seriais de emuladores que terminaram de ligar (espelha o ultimo)
+        self.gerente_emu = None
+        self.janela_emu = None
+        try:
+            if emulador_avd.lista():  # ja ha emuladores: acompanha quais estao ligados (nome na lista de aparelhos)
+                self._gerente_emuladores()
+        except Exception:  # noqa: BLE001
+            pass
         if self.config.get("guardar_recentes", True):
             cap.recentes = recentes.UltimosSegundos()
         self.gravacoes_prontas = []  # (caminho, erro, motivo) vindos da thread da gravacao
@@ -2452,13 +2467,14 @@ class App:
                 ("aparelho", "aparelho", "App e aparelho", "Vers\u00e3o de qualquer app, abrir, parar, limpar dados, permiss\u00f5es e preparo para automa\u00e7\u00e3o", self.abre_painel),
                 ("arquivos", "arquivos", "Arquivos", "Pastas do aparelho: baixar, enviar, abrir e excluir", self.abre_arquivos),
                 ("gravar", "gravar", "Gravar tela", "Grava o que aparece no espelho em MP4 (v\u00eddeo) ou GIF (anima\u00e7\u00e3o curta)", self.menu_gravar),
-                ("memoria", "memoria", "Mem\u00f3ria", "Quanto cada app do aparelho est\u00e1 usando", self.abre_memoria)):
+                ("memoria", "memoria", "Mem\u00f3ria", "Quanto cada app do aparelho est\u00e1 usando", self.abre_memoria),
+                ("emuladores", "emulador", "Emuladores", "Crie e ligue Androids virtuais (SmartPOS, celular, tablet) que aparecem no espelho", self.abre_emuladores)):
             b = self._ferramenta(self.caixa_ferr, icone, nome, "%s|%s" % (nome, dica), cmd)
             self.ferramentas.append((chave, icone, nome, dica, b))
         bt = {c: b for c, _, _, _, b in self.ferramentas}
         self.bt_bug, self.bt_sel, self.bt_instala, self.bt_desinstala = bt["bug"], bt["seletor"], bt["instalar"], bt["desinstalar"]
         self.bt_log_vivo, self.bt_log, self.bt_painel, self.bt_arq = bt["logcat_vivo"], bt["logcat"], bt["aparelho"], bt["arquivos"]
-        self.bt_grava, self.bt_mem = bt["gravar"], bt["memoria"]
+        self.bt_grava, self.bt_mem, self.bt_emu = bt["gravar"], bt["memoria"], bt["emuladores"]
         self.ferr_ocultas = janela_config.ocultas_do_config(self.config, bt)
         self._aplica_ferramentas()
         visual.titulo_secao(col, "Vision")
@@ -2987,6 +3003,21 @@ class App:
         self.msg = (texto, time.time() + segundos)
 
     def fechar(self):
+        meus = self.gerente_emu.ligados_pelo_vision() if self.gerente_emu is not None else []
+        if meus:
+            r = messagebox.askyesnocancel("Emuladores ligados", "Estes emuladores ligados pelo Vision continuam ligados:\n\n%s\n\n"
+                                          "Desligar ao fechar? (N\u00e3o: eles ficam ligados e aparecem no pr\u00f3ximo Vision)" % "\n".join(meus),
+                                          parent=self.root)
+            if r is None:
+                return
+            if r:
+                ts = [threading.Thread(target=self.gerente_emu.desliga, args=(n,), daemon=True) for n in meus]
+                for t in ts:
+                    t.start()
+                for t in ts:
+                    t.join(20)
+        if self.gerente_emu is not None:
+            self.gerente_emu.parar = True
         if self.cap.gravacao is not None:  # salva o que ja foi gravado
             g, self.cap.gravacao = self.cap.gravacao, None
             g.parar()
@@ -3210,6 +3241,43 @@ class App:
             if anterior is None or not txt or txt == anterior[1] or txt == self.clip_do_pc:
                 continue  # ao conectar so anota o que ja estava la; e nao devolve o que veio do PC
             self.root.after(0, lambda t=txt: self._copiado_do_aparelho(t, False))
+
+    # ---- emuladores
+    def _gerente_emuladores(self):
+        if self.gerente_emu is None:
+            self.gerente_emu = janela_emuladores.Gerente(self.cap.adb, rodar, self.emu_prontos.append)
+        return self.gerente_emu
+
+    def _atualiza_rotulos_emulador(self):
+        ligados = dict(self.gerente_emu.ligados)
+        if not ligados:
+            ROTULOS_EMULADOR.clear()
+            return
+        if set(ligados) != set(ROTULOS_EMULADOR):
+            avds = {a["nome"]: a for a in emulador_avd.lista()}
+            ROTULOS_EMULADOR.clear()
+            for serial, nome in ligados.items():
+                a = avds.get(nome)
+                ROTULOS_EMULADOR[serial] = "Emulador \u00b7 %s" % (a["rotulo"] if a else nome or "Android")
+
+    def abre_emuladores(self):
+        if self.janela_emu is not None:
+            try:
+                self.janela_emu.win.deiconify()
+                return self.janela_emu.win.lift()
+            except tk.TclError:
+                self.janela_emu = None
+        self.janela_emu = janela_emuladores.JanelaEmuladores(self.root, self._gerente_emuladores(), icone=aplica_icone,
+                                                             espelhar=self.mostrar_aparelho)
+
+    def mostrar_aparelho(self, serial):
+        """Passa o espelho para este aparelho (o emulador que acabou de ligar, por exemplo)."""
+        if self.cap.serial == serial:
+            return
+        valores = list(self.combo.cget("values") or [])
+        self.combo.set(next((v for v in valores if v.split(" ")[0] == serial), serial))
+        self.escolheu()
+        self.aviso_rapido("espelhando %s" % (ROTULOS_EMULADOR.get(serial) or serial), 5)
 
     # ---- reportar bug
     def reportar_bug(self):
@@ -3933,6 +4001,10 @@ class App:
         if txt is not None:
             self.rodape.mensagem(txt, cor)
         self.root.title("Vision - %s%s" % (cap.serial or "sem aparelho", " (pausado)" if self.pausado else ""))
+        if self.gerente_emu is not None:
+            self._atualiza_rotulos_emulador()
+        while self.emu_prontos:
+            self.mostrar_aparelho(self.emu_prontos.pop(0))
         while self.bugs_prontos:
             self._bug_pronto(*self.bugs_prontos.pop(0))
         while self.gravacoes_prontas:

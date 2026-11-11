@@ -60,12 +60,13 @@ python espelha_tela.py
 | 📱 | **App e aparelho** | Para qualquer app instalado: versão, datas, PID, abrir, parar, reiniciar, limpar dados, conceder permissões e marcar como **★ favorito**. Do aparelho: modelo, Android, bateria, IP e ANDROID_ID. |
 | 🤖 | **Preparar para automação** | Desliga as animações, mantém a tela ligada e trava a rotação. Guarda os valores antigos para restaurar com um clique. |
 | 📦 | **Instalar / Desinstalar APK** | `adb install -r` com tratamento de downgrade e desinstalação de vários pacotes de uma vez. |
-| 📁 | **Arquivos** | Navegar, baixar, enviar, abrir no PC, criar pasta, renomear e excluir (em `/sdcard`, `/storage` e `/data/local/tmp`). |
+| 📁 | **Arquivos** | Navegar, baixar e enviar com barra de progresso e Cancelar, **arrastar arquivos do Explorer** para a pasta aberta, abrir no PC, criar pasta, renomear e excluir (em `/sdcard`, `/storage` e `/data/local/tmp`). |
+| 🎬 | **Gravar tela** | Grava o espelho em **MP4** ou **GIF** (até 60 s) em `Vídeos\Vision`. |
 | 📊 | **Memória** | Gerenciador de tarefas com RSS por processo, PSS sob demanda, variação desde o início, gráficos e exportação para CSV. |
 | 📜 | **Exportar logcat** | O log dos últimos 2, 5 ou 10 minutos num arquivo, usando a hora do aparelho. |
 | 🌐 | **+ IP** | `adb connect` pela rede. O endereço fica salvo e é reconectado sozinho. |
 | 🔌 | **Aviso de adb e porta** | Detecta um `adb.cmd` ou `ADB_SERVER_PORT` apontando para um servidor sem aparelhos e oferece **Usar a porta N**. |
-| 📋 | **Copiar e colar** | **Ctrl+V** cola no aparelho o texto copiado no PC, com acentos. **Ctrl+C** copia a seleção do aparelho para o PC. **Botão direito** na tela copia o texto sob o mouse (até o que não dá para selecionar, como um serial) ou todo o texto da tela. |
+| 📋 | **Copiar e colar** | **Ctrl+V** cola no aparelho o texto copiado no PC, com acentos. **Ctrl+C** copia a seleção do aparelho para o PC. O que um app copiar no aparelho (como o botão de copiar o serial) chega sozinho ao PC. **Botão direito** na tela copia o texto sob o mouse (até o que não dá para selecionar, como um serial) ou todo o texto da tela. |
 | 📷 | **Captura e tela cheia** | PNG em `Imagens\Vision` (Ctrl+S) e tela cheia (F11). |
 
 **Atalhos:** `Ctrl+V` cola no aparelho · `Ctrl+C` copia do aparelho · `F6` liga o seletor · `F9` mostra/oculta a barra lateral · `F11` tela cheia · `Ctrl+S` salva a captura · `Esc` sai do seletor.

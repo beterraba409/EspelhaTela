@@ -44,6 +44,7 @@ ICONES = {
     "aparelho": ("", "\U0001F4F1"),
     "arquivos": ("", "\U0001F4C1"),
     "memoria": ("", "\U0001F4CA"),
+    "gravar": ("", "⏺"),
     "atualizar": ("", "↻"),
     "rede": ("", "+"),
     "janela": ("", "↗"),
@@ -337,6 +338,8 @@ def estilo_ttk(raiz):
         e.configure("%s.TScrollbar" % orient, background=BG2, troughcolor=BG, bordercolor=BG, arrowcolor=FG2,
                     lightcolor=BG2, darkcolor=BG2, gripcount=0)
         e.map("%s.TScrollbar" % orient, background=[("active", HOVER)])
+    e.configure("Horizontal.TProgressbar", background=ACENTO, troughcolor=BG, bordercolor=BORDA, lightcolor=ACENTO,
+                darkcolor=ACENTO, thickness=8)
     raiz.option_add("*TCombobox*Listbox.background", BG2)
     raiz.option_add("*TCombobox*Listbox.foreground", FG)
     raiz.option_add("*TCombobox*Listbox.selectBackground", ACENTO)

@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0 - vídeo sem quadro preso, gravar tela, área de transferência e arquivos
+
+- **Vídeo preso no quadro anterior (causa das "travadas" que ficavam até mexer na tela de novo)**: o decodificador só soltava um quadro quando chegava o começo do próximo. Com a tela do aparelho parada depois de uma mudança (fechar um aviso, por exemplo), o estado final ficava preso no PC, e o espelho mostrava a tela anterior até algo mudar de novo. Agora, quando o aparelho para de mandar dados por um instante, o último quadro é mostrado na hora. A mesma causa fazia a gravação "falhar sem imagem" em telas paradas.
+- **Área de transferência do aparelho → Windows sozinha**: o que for copiado no aparelho (o botão de copiar de um app, como o do serial no SmartPOS, ou uma seleção) vai para a área de transferência do PC em cerca de 1 s, sem Ctrl+C. No Android 12+ o Vision só lê o conteúdo quando ele muda, para não mostrar o aviso de "colou da área de transferência" o tempo todo.
+- **Gravar tela** em **MP4** (vídeo) ou **GIF** (animação, até 60 s), pelo botão em Ferramentas. Salva em `Vídeos\Vision` e abre a pasta com o arquivo selecionado. Grava o que o espelho recebe: para mais resolução, use "Vídeo nítido".
+- **Arquivos**: **⬇ Baixar para o PC** e **⬆ Enviar para o aparelho** com uma faixa de progresso (arquivo, MB e %), botão **Cancelar** (apaga o que ficou pela metade) e o resultado no fim ("Download concluído…" com **Abrir pasta**). A pasta de download usada por último fica lembrada.
+- **Arrastar e soltar**: arquivos e pastas soltos do Explorer na janela Arquivos são enviados para a pasta aberta. Antes de sobrescrever um item com o mesmo nome, o Vision pergunta.
+
 ## 1.9 - copiar textos da tela do aparelho
 
 - **Botão direito** no espelho abre "Copiar “texto”" com o texto do elemento sob o mouse (ou do botão que o contém) e "Copiar todo o texto da tela". Funciona com textos que não dá para selecionar no Android, como o serial na tela inicial do SmartPOS. O texto vem da árvore da tela (a mesma leitura do Seletor; não use com um flow do Maestro rodando).

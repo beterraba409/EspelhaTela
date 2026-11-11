@@ -11,6 +11,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adb_servidor as A  # noqa: E402
 import seletor as S  # noqa: E402
+import transferencia as T  # noqa: E402
 
 WRAPPER = r"""@echo off
 setlocal
@@ -513,6 +514,152 @@ class CopiarTextos(unittest.TestCase):
 
     def test_todo_o_texto_em_ordem_de_leitura(self):
         self.assertEqual(S.texto_da_tela(self.nos).split(chr(10)), ["Bem-vindo", "Iniciar Atendimento", "Serial: 4AG602S0G"])
+
+
+class Transferencias(unittest.TestCase):
+    def test_tamanho_de_arquivo_e_de_pasta(self):
+        with tempfile.TemporaryDirectory() as d:
+            os.makedirs(os.path.join(d, "sub"))
+            for nome, n in (("a.txt", 10), (os.path.join("sub", "b.bin"), 2500)):
+                with open(os.path.join(d, nome), "wb") as f:
+                    f.write(b"x" * n)
+            self.assertEqual(T.tamanho_local(os.path.join(d, "a.txt")), 10)
+            self.assertEqual(T.tamanho_local(d), 2510)
+            self.assertEqual(T.tamanho_local(os.path.join(d, "nao-existe")), 0)
+
+    def test_conflitos_pelo_nome(self):
+        self.assertEqual(T.conflitos(["log.txt", "Download"], ["C:/pc/log.txt", "C:/pc/novo.apk", "C:/pc/Download/"]),
+                         ["log.txt", "Download"])
+
+    def test_texto_do_progresso(self):
+        fmt = lambda n: "%d B" % n  # noqa: E731
+        self.assertEqual(T.texto_progresso("Baixando", 2, 3, "log.txt", 30, 100, fmt), "Baixando 2 de 3: log.txt  -  30 B de 100 B (30%)")
+        self.assertEqual(T.texto_progresso("Enviando", 1, 1, "a.apk", 0, 0, fmt), "Enviando a.apk")
+        self.assertEqual(T.porcentagem(150, 100), 100)
+
+    def _adb_falso(self, d, codigo):
+        script = os.path.join(d, "adb_falso.py")
+        with open(script, "w") as f:
+            f.write(chr(10).join(["import sys", "print('erro de teste: ' + sys.argv[-1])", "sys.exit(%d)" % codigo, ""]))
+        cmd = os.path.join(d, "adb.cmd")
+        with open(cmd, "w") as f:
+            f.write('@"%s" "%s" %%*' % (sys.executable, script) + chr(10))
+        return cmd
+
+    def _roda(self, codigo):
+        with tempfile.TemporaryDirectory() as d:
+            eventos, pronto = [], threading.Event()
+
+            def avisa(ev, dados):
+                eventos.append((ev, dados))
+                if ev == "fim":
+                    pronto.set()
+
+            copias = [T.Copia(["pull", "/sdcard/x", "dest%d" % i], "x%d" % i, 100, lambda: 50) for i in (1, 2)]
+            T.Transferencia(self._adb_falso(d, codigo), "serial", copias, avisa).iniciar()
+            self.assertTrue(pronto.wait(30))
+            return eventos
+
+    def test_copia_completa_soma_o_total(self):
+        eventos = self._roda(0)
+        self.assertEqual(eventos[-1], ("fim", ([], False)))
+        ultimo = [d for e, d in eventos if e == "andamento"][-1]
+        self.assertEqual(ultimo[5:], (200, 200))
+
+    def test_falha_traz_a_mensagem_do_adb(self):
+        falhas, cancelado = self._roda(1)[-1][1]
+        self.assertEqual(falhas, ["x1: erro de teste: dest1", "x2: erro de teste: dest2"])
+        self.assertFalse(cancelado)
+
+
+class UltimoQuadro(unittest.TestCase):
+    """Com a tela do aparelho parada, o ultimo quadro (o estado atual da tela) tem que aparecer."""
+
+    def test_codigo_de_inicio_do_h264(self):
+        import diagnostico_video as D
+        self.assertTrue(D.comeca_com_inicio_de_quadro(bytes([0, 0, 0, 1, 0x65])))
+        self.assertTrue(D.comeca_com_inicio_de_quadro(bytes([0, 0, 1, 0x41])))
+        self.assertFalse(D.comeca_com_inicio_de_quadro(bytes([0x88, 0, 0, 1])))
+
+    def test_tres_quadros_e_tela_parada_mostra_os_tres(self):
+        import fractions
+        import subprocess
+        import time
+        import av
+        import numpy as np
+        import espelha_tela as E
+        enc = av.CodecContext.create("libx264", "w")
+        enc.width, enc.height, enc.pix_fmt = 320, 240, "yuv420p"
+        enc.time_base = fractions.Fraction(1, 30)
+        enc.options = {"tune": "zerolatency", "preset": "ultrafast"}
+        with tempfile.TemporaryDirectory() as d:
+            for i in range(3):
+                fr = av.VideoFrame.from_ndarray(np.full((240, 320, 3), 60 * i, np.uint8), format="rgb24").reformat(format="yuv420p")
+                fr.pts = i
+                with open(os.path.join(d, "q%d.h264" % i), "wb") as f:
+                    f.write(b"".join(bytes(p) for p in enc.encode(fr)))
+            falso = os.path.join(d, "aparelho.py")
+            with open(falso, "w") as f:
+                f.write(chr(10).join([
+                    "import os, sys, time",
+                    "for i in range(3):",
+                    "    sys.stdout.buffer.write(open(os.path.join(%r, 'q%%d.h264' %% i), 'rb').read())" % d,
+                    "    sys.stdout.flush()",
+                    "    time.sleep(0.3)",
+                    "time.sleep(3)", ""]))
+            original = E.subprocess.Popen
+            E.subprocess.Popen = lambda cmd, **k: original([sys.executable, falso], **k)
+            try:
+                cap = E.Captura("adb", "falso", 0.05)
+                fluxo = cap._abre_fluxo("falso", None, "4M")
+                cap._fluxo_ativo = fluxo
+                time.sleep(2.0)
+                self.assertEqual(fluxo["frames"], 3)
+                self.assertEqual(fluxo["cortados"], 0)
+                fluxo["proc"].kill()
+                fluxo["proc"].wait(5)
+                fluxo["proc"].stdout.close()
+                fluxo["proc"].stderr.close()
+            finally:
+                E.subprocess.Popen = original
+
+
+class GravarTela(unittest.TestCase):
+    def _grava(self, formato):
+        import av
+        import numpy as np
+        import gravacao as G
+        fim = threading.Event()
+        with tempfile.TemporaryDirectory() as d:
+            g = G.Gravacao(os.path.join(d, "t." + formato), formato, lambda c, e, m: fim.set())
+            for i in range(20):
+                img = np.zeros((641, 287, 3), np.uint8)
+                img[:, :i * 10] = 200
+                g.quadro(av.VideoFrame.from_ndarray(img, format="rgb24"))
+                g.t_ultimo = -1.0  # sem esperar o intervalo entre quadros
+            g.parar()
+            self.assertTrue(fim.wait(30))
+            self.assertEqual(g.erro, "")
+            with av.open(g.caminho) as ct:
+                s = ct.streams.video[0]
+                n = sum(1 for _ in ct.decode(s))
+            self.assertEqual(g.gravados + g.pulados, 21)  # 20 quadros + o ultimo repetido no fim; fila cheia pula, nunca trava
+            self.assertEqual(n, g.gravados)
+            return s.codec_context.name, s.width, s.height, n
+
+    def test_mp4_h264_com_lados_pares(self):
+        nome, larg, alt, n = self._grava("mp4")
+        self.assertEqual((nome, larg, alt), ("h264", 286, 640))
+        self.assertGreater(n, 1)
+
+    def test_gif_animado(self):
+        nome, larg, alt, n = self._grava("gif")
+        self.assertEqual((nome, larg, alt), ("gif", 287, 641))
+        self.assertGreater(n, 1)
+
+    def test_tempo_no_rodape(self):
+        import gravacao as G
+        self.assertEqual(G.nome_do_tempo(75.4), "01:15")
 
 
 if __name__ == "__main__":

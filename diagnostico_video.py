@@ -133,6 +133,11 @@ class RegistroVideo:
             self._zera()
 
 
+def comeca_com_inicio_de_quadro(dados):
+    """O bloco do H.264 (Annex B) comeca num codigo de inicio de NAL? Se nao, o que veio antes estava incompleto."""
+    return dados.startswith(b"\x00\x00\x01") or dados.startswith(b"\x00\x00\x00\x01")
+
+
 def bytes_na_fila(proc):
     """Bytes de video que chegaram do aparelho e ainda nao foram lidos (so Windows)."""
     try:

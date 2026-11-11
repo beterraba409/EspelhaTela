@@ -70,8 +70,11 @@ import visual  # noqa: E402  (botoes, icones do Windows, barra lateral e rodape)
 import atualizacao  # noqa: E402  (busca de versoes novas no GitHub)
 import apk  # noqa: E402  (pacote e versao de um APK, sem o Android SDK)
 import diagnostico_video  # noqa: E402  (registro das travadas do video)
+import arrastar  # noqa: E402  (arquivos soltos do Explorer na janela)
+import transferencia  # noqa: E402  (adb pull/push com progresso e cancelamento)
+import gravacao  # noqa: E402  (gravar a tela em .mp4 ou .gif)
 
-VERSAO = "1.9"
+VERSAO = "2.0"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -258,7 +261,8 @@ class Injetor:
         self.t_erro = 0.0
         self.iniciando = False
         self.lock = threading.Lock()
-        self.respostas = queue.Queue()  # linhas "CLIP ..." e "CLIPSET ..." do injetor
+        self.respostas = queue.Queue()  # linhas "CLIP ...", "CLIPSET ..." e "CLIPW ..." do injetor
+        self.lock_pergunta = threading.Lock()  # uma pergunta por vez (a sincronia da area de transferencia tambem pergunta)
 
     def ok(self, serial):
         return bool(self.pronto and self.serial == serial and self.proc is not None and self.proc.poll() is None)
@@ -304,7 +308,7 @@ class Injetor:
                         self.t_erro = time.time()
                     elif linha.startswith("ERR"):
                         self.ultimo_erro = linha[:120]
-                    elif linha.split(" ", 1)[0] in ("CLIP", "CLIPSET"):
+                    elif linha.split(" ", 1)[0] in ("CLIP", "CLIPSET", "CLIPW"):
                         self.respostas.put(linha)
 
             threading.Thread(target=leitor, daemon=True).start()
@@ -332,6 +336,10 @@ class Injetor:
 
     def pergunta(self, linha, serial, tipo, espera=2.0):
         """Envia um comando e espera a resposta `tipo` (ex.: "CLIP"). Devolve o resto da linha ou None."""
+        with self.lock_pergunta:
+            return self._pergunta(linha, serial, tipo, espera)
+
+    def _pergunta(self, linha, serial, tipo, espera):
         while not self.respostas.empty():
             self.respostas.get_nowait()  # resposta velha de um pedido que expirou
         if not self.envia(linha, serial):
@@ -370,6 +378,7 @@ class Captura(threading.Thread):
     def __init__(self, adb, serial, intervalo_min, modo="video", perfil="rapido"):
         super().__init__(daemon=True)
         self.adb = adb
+        self.gravacao = None  # gravacao de tela em andamento (recebe cada quadro mostrado)
         self.serial = serial
         self.intervalo_min = intervalo_min
         self.modo = modo
@@ -493,6 +502,9 @@ class Captura(threading.Thread):
                 return
             self.frame = img
             self.t_frame = time.time()
+            g = self.gravacao
+            if g is not None:
+                g.quadro(img)
             self.ms = int((time.time() - t0) * 1000)
             self.erro = ""
             self.seq += 1
@@ -506,6 +518,7 @@ class Captura(threading.Thread):
     # ---- modo video
     LIMITE_GRAVACAO = 180  # s: o screenrecord do Android grava no maximo isso de uma vez
     ANTECEDENCIA = 6  # s antes do fim em que a proxima gravacao ja e aberta (troca sem pausa)
+    QUIETO = 0.035  # s sem dados do aparelho para considerar o ultimo quadro completo e mostra-lo
 
     def _abre_fluxo(self, serial, size, taxa, candidato=False):
         """Uma gravacao (screenrecord) com seu decodificador. Os quadros so vao para a tela se ela for
@@ -517,7 +530,7 @@ class Captura(threading.Thread):
         cmd.append("-")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=SEM_JANELA, bufsize=0)
         f = {"proc": proc, "frames": 0, "erro": "", "stderr": b"", "inicio": time.time(), "candidato": candidato,
-             "t_primeiro": None, "t_fim": None}
+             "t_primeiro": None, "t_fim": None, "cortados": 0}
 
         def drena_erro():  # sem isso o pipe de erro pode encher e travar o screenrecord
             try:
@@ -529,35 +542,68 @@ class Captura(threading.Thread):
             except Exception:
                 pass
 
+        def entrega(pacotes, proc=proc):
+            for pkt in pacotes:
+                t0 = time.perf_counter()
+                for fr in codec_ref[0].decode(pkt):
+                    f["frames"] += 1
+                    if f["t_primeiro"] is None:
+                        f["t_primeiro"] = time.time()
+                    if self._fluxo_ativo is not f:
+                        if not f["candidato"]:
+                            continue  # gravacao antiga, ja substituida
+                        self._fluxo_ativo = f  # a proxima gravacao assume sem pausa
+                    self._av = fr  # sem converter: so o quadro desenhado vira RGB
+                    g = self.gravacao
+                    if g is not None:
+                        g.quadro(fr)
+                    self.t_frame = time.time()
+                    self.erro = ""
+                    self.seq += 1
+                    self.diag.quadro((time.perf_counter() - t0) * 1000, diagnostico_video.bytes_na_fila(proc))
+
+        codec_ref, trava = [None], threading.Lock()
+        estado = {"t_dado": 0.0, "retido": False, "liberou": False}
+
+        def libera():
+            """O parser so solta um quadro quando chega o comeco do proximo: com a tela parada, o ultimo
+            (o estado final da tela) ficaria preso no PC. Fluxo quieto por um instante = quadro completo."""
+            while proc.poll() is None or estado["retido"]:
+                time.sleep(0.01)
+                if not estado["retido"] or time.perf_counter() - estado["t_dado"] < self.QUIETO:
+                    continue
+                with trava:
+                    if not estado["retido"] or time.perf_counter() - estado["t_dado"] < self.QUIETO:
+                        continue
+                    estado["retido"], estado["liberou"] = False, True
+                    try:
+                        entrega(list(codec_ref[0].parse(None)))
+                    except Exception as e:  # noqa: BLE001
+                        f["erro"] = str(e)[:120]
+                if proc.poll() is not None:
+                    break
+
         def leitor():
             try:
-                codec = av.CodecContext.create("h264", "r")
+                codec_ref[0] = av.CodecContext.create("h264", "r")
                 try:
-                    codec.thread_count = 1  # sem fila de threads: menos atraso
+                    codec_ref[0].thread_count = 1  # sem fila de threads: menos atraso
                 except Exception:
                     pass
+                threading.Thread(target=libera, daemon=True).start()
                 while True:
                     dados = proc.stdout.read(65536)
                     if not dados:
                         break
-                    try:
-                        for pkt in codec.parse(dados):
-                            t0 = time.perf_counter()
-                            for fr in codec.decode(pkt):
-                                f["frames"] += 1
-                                if f["t_primeiro"] is None:
-                                    f["t_primeiro"] = time.time()
-                                if self._fluxo_ativo is not f:
-                                    if not f["candidato"]:
-                                        continue  # gravacao antiga, ja substituida
-                                    self._fluxo_ativo = f  # a proxima gravacao assume sem pausa
-                                self._av = fr  # sem converter: so o quadro desenhado vira RGB
-                                self.t_frame = time.time()
-                                self.erro = ""
-                                self.seq += 1
-                                self.diag.quadro((time.perf_counter() - t0) * 1000, diagnostico_video.bytes_na_fila(proc))
-                    except Exception as e:  # noqa: BLE001  pacote corrompido: segue com o proximo
-                        f["erro"] = str(e)[:120]
+                    with trava:
+                        if estado["liberou"] and not diagnostico_video.comeca_com_inicio_de_quadro(dados):
+                            f["cortados"] += 1  # liberou no meio de um quadro: a imagem pode borrar ate o proximo quadro-chave
+                        estado["liberou"] = False
+                        try:
+                            entrega(codec_ref[0].parse(dados))
+                        except Exception as e:  # noqa: BLE001  pacote corrompido: segue com o proximo
+                            f["erro"] = str(e)[:120]
+                        estado["t_dado"], estado["retido"] = time.perf_counter(), True
             except Exception as e:  # noqa: BLE001
                 f["erro"] = str(e)[:120]
 
@@ -645,7 +691,7 @@ class Captura(threading.Thread):
             self._codificadores_lidos.add(serial)
             threading.Thread(target=self._registra_codificador, args=(serial,), daemon=True).start()
         self.via = "video"
-        motivo, teve_quadro = "fim", False
+        motivo, teve_quadro, cortados_vistos = "fim", False, 0
         while True:
             agora = time.time()
             self.diag.periodico()
@@ -655,9 +701,12 @@ class Captura(threading.Thread):
             if atual["frames"] and not teve_quadro:
                 teve_quadro = True
                 self.diag.evento("primeiro quadro em %.1f s" % (atual["t_primeiro"] - atual["inicio"]))
-            # perto do fim da gravacao: abre a proxima para emendar sem pausa
+            if atual["cortados"] > cortados_vistos:
+                cortados_vistos = atual["cortados"]
+                self.diag.evento("quadro mostrado antes de chegar inteiro (rede lenta?): abro outra gravacao para limpar a imagem")
+            # perto do fim da gravacao (ou com quadro cortado): abre a proxima para emendar sem pausa
             if (proximo is None and atual["frames"] and serial not in self._sem_sobreposicao
-                    and agora - atual["inicio"] > self.LIMITE_GRAVACAO - self.ANTECEDENCIA):
+                    and (agora - atual["inicio"] > self.LIMITE_GRAVACAO - self.ANTECEDENCIA or atual["cortados"])):
                 proximo = self._abre_fluxo(serial, size, taxa, candidato=True)
             if proximo is not None:
                 if self._fluxo_ativo is proximo:  # a proxima ja mostrou o primeiro quadro
@@ -666,6 +715,7 @@ class Captura(threading.Thread):
                     self._fecha_fluxo(atual)
                     atual, proximo = proximo, None
                     atual["candidato"] = False
+                    cortados_vistos = 0
                     continue
                 if proximo["proc"].poll() is not None and not proximo["frames"]:
                     self._sem_sobreposicao.add(serial)
@@ -1294,8 +1344,8 @@ class GerenciadorArquivos:
 
         acoes = tk.Frame(w, bg=BG)
         acoes.pack(fill="x", padx=10, pady=4)
-        self._bt(acoes, "Baixar", "Baixar para o PC", "Copia os itens marcados para uma pasta do PC (adb pull)", self.baixar)
-        self._bt(acoes, "Enviar", "Enviar para o aparelho", "Escolhe arquivos do PC e coloca nesta pasta (adb push)", self.enviar)
+        self._bt(acoes, "⬇  Baixar para o PC", "Baixar para o PC", "Faz o download dos itens marcados para uma pasta do PC (adb pull)", self.baixar)
+        self._bt(acoes, "⬆  Enviar para o aparelho", "Enviar para o aparelho", "Escolhe arquivos do PC e coloca nesta pasta. Tambem da para arrastar do Explorer para esta janela.", self.enviar)
         self._bt(acoes, "Abrir no PC", "Abrir no PC", "Baixa para a pasta temporaria e abre com o programa padrão", self.abrir)
         self._bt(acoes, "Nova pasta", "Nova pasta", "Cria uma pasta aqui", self.nova_pasta)
         self._bt(acoes, "Renomear", "Renomear", "Muda o nome do item marcado", self.renomear)
@@ -1303,7 +1353,7 @@ class GerenciadorArquivos:
         self.lb_esp = tk.Label(acoes, text="", bg=BG, fg=FG2, font=("Segoe UI", 9))
         self.lb_esp.pack(side="right")
 
-        corpo = tk.Frame(w, bg=BG)
+        corpo = self._corpo = tk.Frame(w, bg=BG)
         corpo.pack(fill="both", expand=True, padx=10, pady=(4, 0))
         cols = ("nome", "tam", "data", "perm")
         self.tv = ttk.Treeview(corpo, columns=cols, show="headings", selectmode="extended")
@@ -1321,7 +1371,11 @@ class GerenciadorArquivos:
         self.tv.bind("<F5>", lambda e: self.vai(self.caminho, False))
 
         self.rodape = tk.Label(w, text="", bg=BG, fg=FG2, anchor="w", font=("Segoe UI", 9), padx=10)
-        self.rodape.pack(fill="x", pady=(4, 8))
+        self.rodape.pack(fill="x", pady=(2, 8), side="bottom", before=corpo)
+        self._monta_faixa()
+        self.transf = None
+        self.arrasta = arrastar.aceitar(w, self.soltou)
+        self._dica_arrastar()
 
         threading.Thread(target=self._espaco, daemon=True).start()
         self.vai(self.caminho, True)
@@ -1342,7 +1396,7 @@ class GerenciadorArquivos:
             _, out, _ = self._adb("shell", "df -k /sdcard | tail -1", timeout=15)
             c = out.split()
             if len(c) >= 4 and c[1].isdigit():
-                self.q.put(("espaco", "armazenamento: %s livres de %s" % (tamanho_legivel(int(c[3]) * 1024), tamanho_legivel(int(c[1]) * 1024))))
+                self.q.put(("espaco", "%s livres de %s" % (tamanho_legivel(int(c[3]) * 1024), tamanho_legivel(int(c[1]) * 1024))))
         except Exception:
             pass
 
@@ -1353,6 +1407,8 @@ class GerenciadorArquivos:
             self.hist.append(self.caminho)
         self.caminho = caminho
         self.var_cam.set(caminho)
+        if hasattr(self, "dica_arr"):
+            self._dica_arrastar()
         self.rodape.configure(text="listando %s ..." % caminho, fg=FG2)
 
         def trabalho():
@@ -1441,22 +1497,189 @@ class GerenciadorArquivos:
 
         threading.Thread(target=trabalho, daemon=True).start()
 
+    # ---- faixa de transferencia (download/envio com progresso, cancelar e resultado)
+    def _monta_faixa(self):
+        self.dica_arr = tk.Label(self.win, text="", bg=BG, fg=FG2, anchor="w", font=("Segoe UI", 9), padx=10)
+        self.dica_arr.pack(fill="x", side="bottom", before=self._corpo)
+        f = self.faixa = tk.Frame(self.win, bg=BG2, padx=10, pady=8, highlightthickness=1, highlightbackground=ACENTO)
+        topo = tk.Frame(f, bg=BG2)
+        topo.pack(fill="x")
+        self.faixa_titulo = tk.Label(topo, text="", bg=BG2, fg=FG, anchor="w", font=("Segoe UI Semibold", 10))
+        self.faixa_titulo.pack(side="left", fill="x", expand=True)
+        self.faixa_bt = ttk.Button(topo, text="Cancelar", command=self._cancela_ou_abre)
+        self.faixa_bt.pack(side="right")
+        self.faixa_fecha = ttk.Button(topo, text="\u2715", width=3, command=self._esconde_faixa)
+        self.faixa_texto = tk.Label(f, text="", bg=BG2, fg=FG2, anchor="w", font=("Segoe UI", 9))
+        self.faixa_texto.pack(fill="x", pady=(4, 4))
+        self.faixa_barra = ttk.Progressbar(f, mode="determinate", maximum=100)
+        self.faixa_barra.pack(fill="x")
+        self.faixa_pasta = None
+
+    def _dica_arrastar(self):
+        if self.arrasta:
+            self.dica_arr.configure(text="\u2191  Arraste arquivos ou pastas do PC para esta janela para enviar a %s" % self.caminho)
+
+    def _mostra_faixa(self, titulo, cor):
+        self.faixa.configure(highlightbackground=cor)
+        self.faixa_titulo.configure(text=titulo, fg=cor if cor != ACENTO else FG)
+        if not self.faixa.winfo_ismapped():
+            self.faixa.pack(fill="x", padx=10, pady=(6, 2), side="bottom", before=self._corpo)
+
+    def _esconde_faixa(self):
+        if not self.transf:
+            self.faixa.pack_forget()
+
+    def _cancela_ou_abre(self):
+        if self.transf:
+            self.faixa_bt.configure(state="disabled")
+            self.faixa_texto.configure(text="cancelando...")
+            self.transf.cancelar()
+        elif self.faixa_pasta:
+            alvo = self.faixa_pasta
+            if os.name == "nt":
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(alvo)] if os.path.exists(alvo) else ["explorer", os.path.dirname(alvo)])
+
+    def transferir(self, tipo, copias, destino, depois=None):
+        """tipo 'baixar' | 'enviar' | 'abrir'. destino: pasta do PC (baixar/abrir) ou do aparelho (enviar)."""
+        if self.ocupado or self.transf:
+            return messagebox.showinfo("Arquivos", "Aguarde terminar: %s" % (self.ocupado or "a c\u00f3pia em andamento"), parent=self.win)
+        acao = {"baixar": "Baixando", "enviar": "Enviando", "abrir": "Baixando para abrir"}[tipo]
+        self.transf_info = (tipo, acao, destino, copias, depois)
+        self.faixa_pasta = None
+        self.faixa_bt.configure(text="Cancelar", state="normal")
+        self.faixa_bt.pack(side="right")
+        self.faixa_fecha.pack_forget()
+        para = "para o PC em %s" % destino if tipo != "enviar" else "para o aparelho em %s" % destino
+        self._mostra_faixa("%s %d item(ns) %s" % ("\u2193  Download:" if tipo != "enviar" else "\u2191  Envio:", len(copias), para), ACENTO)
+        self.faixa_texto.configure(text="preparando...")
+        self.faixa_barra.configure(value=0)
+        self.rodape.configure(text="%s ..." % acao.lower(), fg=ACENTO)
+        self.transf = transferencia.Transferencia(self.cap.adb, self.cap.serial, copias,
+                                                  lambda ev, dados: self.q.put(("andamento" if ev == "andamento" else "transf_fim", dados)),
+                                                  sem_janela=SEM_JANELA)
+        self.transf.iniciar()
+
+    def _andamento(self, i, n, nome, feito, total, feito_geral, total_geral):
+        if not self.transf:
+            return
+        acao = self.transf_info[1]
+        self.faixa_texto.configure(text=transferencia.texto_progresso(acao, i, n, nome, feito, total, tamanho_legivel))
+        if total_geral > 0:
+            self.faixa_barra.configure(mode="determinate", value=transferencia.porcentagem(feito_geral, total_geral))
+        else:
+            self.faixa_barra.configure(mode="determinate", value=int(100 * (i - 1) / max(1, n)))
+
+    def _fim_transferencia(self, falhas, cancelado):
+        tipo, acao, destino, copias, depois = self.transf_info
+        self.transf = None
+        self.faixa_bt.configure(state="normal")
+        self.faixa_fecha.pack(side="right", padx=(0, 6))
+        self.faixa_barra.configure(value=0 if (cancelado or falhas) else 100)
+        nome_op = "Download" if tipo != "enviar" else "Envio"
+        if cancelado:
+            self._mostra_faixa("\u2715  %s cancelado" % nome_op, PERIGO)
+            self.faixa_texto.configure(text="o que estava pela metade foi apagado")
+            self.faixa_bt.pack_forget()
+            self.rodape.configure(text="%s cancelado" % nome_op.lower(), fg=FG2)
+        elif falhas:
+            self._mostra_faixa("\u26A0  %s com falha em %d de %d item(ns)" % (nome_op, len(falhas), len(copias)), PERIGO)
+            self.faixa_texto.configure(text=falhas[0])
+            self.faixa_bt.pack_forget()
+            self.rodape.configure(text="falhou: %s" % falhas[0][:160], fg=PERIGO)
+            messagebox.showerror("Arquivos", "Houve falha:\n\n%s" % "\n".join(falhas[:6]), parent=self.win)
+        else:
+            total = sum(max(0, c.total) for c in copias)
+            tam = (" (%s)" % tamanho_legivel(total)) if total else ""
+            if tipo == "enviar":
+                self._mostra_faixa("\u2714  Envio conclu\u00eddo: %d item(ns)%s em %s" % (len(copias), tam, destino), visual.VERDE)
+                self.faixa_texto.configure(text="os arquivos j\u00e1 est\u00e3o no aparelho")
+                self.faixa_bt.pack_forget()
+            else:
+                self._mostra_faixa("\u2714  Download conclu\u00eddo: %d item(ns)%s salvos no PC" % (len(copias), tam), visual.VERDE)
+                self.faixa_texto.configure(text=destino)
+                self.faixa_pasta = os.path.join(destino, copias[0].nome) if copias else destino
+                self.faixa_bt.configure(text="Abrir pasta")
+            self.rodape.configure(text="%s conclu\u00eddo" % nome_op.lower(), fg=FG2)
+            if depois:
+                depois()
+        if tipo == "abrir" and not (cancelado or falhas):
+            self.faixa.pack_forget()
+
+    # ---- baixar / enviar / abrir
+    def _copia_pull(self, item, destino):
+        nome, tipo, tam = item[0], item[1], item[2]
+        remoto, local = self._remoto(nome), os.path.join(destino, nome)
+        if tipo == "file":
+            total = tam
+        else:
+            total = lambda r=remoto: 1024 * int((self._adb("shell", "du -sk %s 2>/dev/null" % q(r + "/"), timeout=60)[1].split() or ["0"])[0])
+
+        def limpa(local=local, era=os.path.exists(local)):
+            if era:
+                return
+            if os.path.isdir(local):
+                shutil.rmtree(local, ignore_errors=True)
+            elif os.path.exists(local):
+                os.remove(local)
+
+        return transferencia.Copia(["pull", remoto, destino], nome, total, lambda: transferencia.tamanho_local(local), limpa)
+
+    def _copia_push(self, local):
+        nome = os.path.basename(local.rstrip("/\\"))
+        remoto = self._remoto(nome)
+        pasta = os.path.isdir(local)
+        cmd = "du -sk %s 2>/dev/null" % q(remoto) if pasta else "stat -c %%s %s 2>/dev/null || wc -c < %s" % (q(remoto), q(remoto))
+
+        def mede():
+            v = (self._adb("shell", cmd, timeout=15)[1].split() or ["0"])[0]
+            return int(v) * (1024 if pasta else 1) if v.isdigit() else 0
+
+        def limpa(era=nome in {i[0] for i in self.itens.values()}):
+            if not self._protegido(remoto) and not era:  # so apaga o que esta copia criou
+                self._adb("shell", "rm -rf " + q(remoto), timeout=30)
+
+        return transferencia.Copia(["push", local, self.caminho.rstrip("/") + "/"], nome, transferencia.tamanho_local(local), mede, limpa)
+
     def baixar(self):
         sel = self.marcados()
         if not sel:
             return messagebox.showinfo("Arquivos", "Marque o que deseja baixar.", parent=self.win)
-        destino = filedialog.askdirectory(title="Salvar no PC em...", initialdir=os.path.join(os.path.expanduser("~"), "Downloads"), parent=self.win)
+        cfg = carregar_config()
+        inicial = cfg.get("pasta_download") if os.path.isdir(cfg.get("pasta_download") or "") else os.path.join(os.path.expanduser("~"), "Downloads")
+        destino = filedialog.askdirectory(title="Fazer o download para qual pasta do PC?", initialdir=inicial, parent=self.win)
         if not destino:
             return
-        cmds = [["pull", self._remoto(i[0]), destino] for i in sel]
-        self.tarefa("baixando %d item(ns) para %s ..." % (len(sel), destino), cmds, lambda: os.startfile(destino) if os.name == "nt" else None)
+        destino = os.path.normpath(destino)
+        cfg["pasta_download"] = destino
+        salvar_config(cfg)
+        repetidos = transferencia.conflitos(os.listdir(destino), [i[0] for i in sel])
+        if repetidos and not messagebox.askyesno("Baixar", "J\u00e1 existe no PC, em %s:\n\n%s\n\nSubstituir?" % (destino, "\n".join(repetidos[:8])), icon="warning", parent=self.win):
+            return
+        self.transferir("baixar", [self._copia_pull(i, destino) for i in sel], destino)
 
     def enviar(self):
-        arqs = filedialog.askopenfilenames(title="Escolha os arquivos para enviar", parent=self.win)
-        if not arqs:
+        arqs = filedialog.askopenfilenames(title="Escolha os arquivos para enviar a %s" % self.caminho, parent=self.win)
+        if arqs:
+            self.enviar_caminhos(list(arqs))
+
+    def soltou(self, caminhos):
+        """Arquivos/pastas soltos do Explorer na janela: vao para a pasta aberta."""
+        self.win.lift()
+        self.enviar_caminhos([c for c in caminhos if os.path.exists(c)])
+
+    def enviar_caminhos(self, caminhos):
+        if not caminhos:
             return
-        cmds = [["push", a, self.caminho.rstrip("/") + "/"] for a in arqs]
-        self.tarefa("enviando %d arquivo(s) para %s ..." % (len(arqs), self.caminho), cmds, lambda: self.vai(self.caminho, False))
+        if self.ocupado or self.transf:
+            return messagebox.showinfo("Arquivos", "Aguarde terminar: %s" % (self.ocupado or "a c\u00f3pia em andamento"), parent=self.win)
+        if self._protegido(self.caminho) and not messagebox.askyesno(
+                "Enviar", "%s fica fora de /sdcard, /storage e /data/local/tmp: o Android costuma recusar a grava\u00e7\u00e3o aqui.\n\nTentar mesmo assim?" % self.caminho,
+                icon="warning", parent=self.win):
+            return
+        repetidos = transferencia.conflitos([i[0] for i in self.itens.values()], caminhos)
+        if repetidos and not messagebox.askyesno("Enviar", "J\u00e1 existe no aparelho, em %s:\n\n%s\n\nSubstituir?" % (self.caminho, "\n".join(repetidos[:8])), icon="warning", parent=self.win):
+            return
+        self.transferir("enviar", [self._copia_push(c) for c in caminhos], self.caminho, lambda: self.vai(self.caminho, False))
 
     def abrir(self):
         sel = [i for i in self.marcados() if i[1] == "file"]
@@ -1464,7 +1687,7 @@ class GerenciadorArquivos:
             return messagebox.showinfo("Arquivos", "Marque um arquivo para abrir.", parent=self.win)
         pasta = tempfile.mkdtemp(prefix="vision-")
         alvo = os.path.join(pasta, sel[0][0])
-        self.tarefa("baixando %s para abrir ..." % sel[0][0], [["pull", self._remoto(sel[0][0]), pasta]], lambda: os.startfile(alvo) if os.name == "nt" and os.path.exists(alvo) else None)
+        self.transferir("abrir", [self._copia_pull(sel[0], pasta)], pasta, lambda: os.startfile(alvo) if os.name == "nt" and os.path.exists(alvo) else None)
 
     def _protegido(self, caminho):
         return not any(caminho == s or caminho.startswith(s + "/") for s in SEGUROS)
@@ -1522,6 +1745,10 @@ class GerenciadorArquivos:
                         self.rodape.configure(text="%s  -  %d pasta(s), %d arquivo(s)" % (cam, pastas, len(itens) - pastas), fg=FG2)
                 elif m[0] == "espaco":
                     self.lb_esp.configure(text=m[1])
+                elif m[0] == "andamento":
+                    self._andamento(*m[1])
+                elif m[0] == "transf_fim":
+                    self._fim_transferencia(*m[1])
                 elif m[0] == "fim":
                     _, texto, falhas, depois = m
                     self.ocupado = ""
@@ -1537,6 +1764,10 @@ class GerenciadorArquivos:
         self.win.after(150, self._consome)
 
     def fechar(self):
+        if self.transf and not messagebox.askyesno("Arquivos", "Ainda tem uma cópia em andamento. Cancelar e fechar?", parent=self.win):
+            return
+        if self.transf:
+            self.transf.cancelar()
         self.parar = True
         self.app.arq = None
         self.win.destroy()
@@ -2124,6 +2355,10 @@ class App:
         self.toque = None
         self.fila = queue.Queue()
         self.inj = Injetor(cap.adb)
+        self.clip_visto = {}  # serial -> (marca, texto) da area de transferencia do aparelho
+        self.gravacoes_prontas = []  # (caminho, erro, motivo) vindos da thread da gravacao
+        self.clip_do_pc = ""  # o que o Ctrl+V mandou para o aparelho (nao volta para o PC como novidade)
+        threading.Thread(target=self._sincroniza_area_loop, daemon=True).start()
         self.via_inj = False
         self.ult_mov = 0.0
         self.fps_hist = []
@@ -2175,6 +2410,7 @@ class App:
         self.bt_log = self._ferramenta(col, "logcat", "Exportar logcat", "Exportar logcat|Salva em arquivo o log dos \u00faltimos 2, 5 ou 10 minutos", self.menu_logcat)
         self.bt_painel = self._ferramenta(col, "aparelho", "App e aparelho", "App e aparelho|Vers\u00e3o de qualquer app, abrir, parar, limpar dados, permiss\u00f5es e preparo para automa\u00e7\u00e3o", self.abre_painel)
         self.bt_arq = self._ferramenta(col, "arquivos", "Arquivos", "Arquivos|Pastas do aparelho: baixar, enviar, abrir e excluir", self.abre_arquivos)
+        self.bt_grava = self._ferramenta(col, "gravar", "Gravar tela", "Gravar tela|Grava o que aparece no espelho em MP4 (vídeo) ou GIF (animação curta). Salva em Vídeos\\Vision", self.menu_gravar)
         self.bt_mem = self._ferramenta(col, "memoria", "Mem\u00f3ria", "Mem\u00f3ria|Quanto cada app do aparelho est\u00e1 usando", self.abre_memoria)
         visual.titulo_secao(col, "Vision")
         self._ferramenta(col, "aparencia", "Apar\u00eancia", "Apar\u00eancia|Tema claro ou escuro e cor de destaque", self.abre_aparencia)
@@ -2621,6 +2857,10 @@ class App:
         self.msg = (texto, time.time() + segundos)
 
     def fechar(self):
+        if self.cap.gravacao is not None:  # salva o que ja foi gravado
+            g, self.cap.gravacao = self.cap.gravacao, None
+            g.parar()
+            g.thread.join(timeout=20)
         self.cap.parar = True
         for filha in (self.painel, self.arq, self.mem):
             try:
@@ -2793,6 +3033,7 @@ class App:
         txt = txt.replace("\r\n", "\n")
         if not txt:
             return self.aviso_rapido("nada para colar: a area de transferencia do PC esta vazia")
+        self.clip_do_pc = txt
         if self.inj_envia("v " + quote(txt, safe="")):
             return self.aviso_rapido("colado no aparelho: %s" % resumo_texto(txt), 3)
         simples = "".join(c for c in txt.replace("\n", " ") if re.fullmatch(r"[A-Za-z0-9 .,_@:/+=-]", c))
@@ -2815,13 +3056,85 @@ class App:
 
         threading.Thread(target=trabalho, daemon=True).start()
 
+    def _sincroniza_area_loop(self):
+        """O que for copiado no aparelho (o botao de copiar de um app, uma selecao) vai sozinho para a area
+        de transferencia do Windows. Pergunta a cada segundo so QUANDO ela mudou ("w"); o texto e lido
+        apenas se mudou, porque no Android 12+ cada leitura mostra o aviso de "colou"."""
+        while not self.cap.parar:
+            time.sleep(1.0)
+            serial = self.cap.serial
+            if not serial or not self.inj.ok(serial):
+                continue
+            marca = self.inj.pergunta("w", serial, "CLIPW", espera=1.5)
+            if marca is None or marca == "vazio":
+                continue
+            anterior = self.clip_visto.get(serial)
+            if marca != "?" and anterior is not None and anterior[0] == marca:
+                continue
+            r = self.inj.pergunta("g", serial, "CLIP", espera=1.5)
+            if r is None:
+                continue
+            txt = unquote(r)
+            self.clip_visto[serial] = (marca, txt)
+            if anterior is None or not txt or txt == anterior[1] or txt == self.clip_do_pc:
+                continue  # ao conectar so anota o que ja estava la; e nao devolve o que veio do PC
+            self.root.after(0, lambda t=txt: self._copiado_do_aparelho(t, False))
+
+    # ---- gravar a tela (.mp4 ou .gif)
+    def menu_gravar(self):
+        if self.cap.gravacao is not None:
+            return self.parar_gravacao()
+        if not self.cap.serial:
+            return messagebox.showwarning("Vision", "Nenhum aparelho selecionado.")
+        m = tk.Menu(self.root, tearoff=0, bg=BG2, fg=FG, activebackground=ACENTO, activeforeground="#ffffff", bd=0)
+        m.add_command(label="Gravar em MP4 (vídeo)", command=lambda: self.iniciar_gravacao("mp4"))
+        m.add_command(label="Gravar em GIF (animação, até %d s)" % gravacao.LIMITE_GIF, command=lambda: self.iniciar_gravacao("gif"))
+        b = self.bt_grava
+        m.tk_popup(b.winfo_rootx() + 12, b.winfo_rooty() + b.winfo_height())
+
+    def iniciar_gravacao(self, formato):
+        pasta = os.path.join(os.path.expanduser("~"), "Videos", "Vision")
+        os.makedirs(pasta, exist_ok=True)
+        nome = "gravacao-%s-%s.%s" % (re.sub(r"[^A-Za-z0-9._-]", "_", self.cap.serial or "aparelho"),
+                                        datetime.datetime.now().strftime("%Y%m%d-%H%M%S"), formato)
+        self.cap.gravacao = gravacao.Gravacao(os.path.join(pasta, nome), formato,
+                                              lambda c, e, m: self.gravacoes_prontas.append((c, e, m)))
+        if self.cap._av is not None or self.cap.frame is not None:
+            self.cap.gravacao.quadro(self.cap._av if self.cap._av is not None else self.cap.frame)  # a tela como esta agora
+        self.bt_grava.define(texto="Parar gravação", ativo=True)
+        self.aviso_rapido("gravando em %s: clique em Parar gravação para salvar" % formato.upper(), 4)
+
+    def parar_gravacao(self):
+        g, self.cap.gravacao = self.cap.gravacao, None
+        if g is None:
+            return
+        g.parar()
+        self.bt_grava.define(texto="Salvando…", ativo=False)
+        self.aviso_rapido("salvando a gravação…", 30)
+
+    def _gravacao_pronta(self, caminho, erro, motivo):
+        if self.cap.gravacao is not None and self.cap.gravacao.caminho == caminho:
+            self.cap.gravacao = None  # parou sozinha (limite do GIF)
+        self.bt_grava.define(texto="Gravar tela", ativo=False)
+        if erro:
+            return self.aviso_rapido("a gravação falhou: %s" % erro, 8)
+        extra = " (limite de %d s do GIF)" % gravacao.LIMITE_GIF if motivo == "limite" else ""
+        self.aviso_rapido("gravação salva%s: %s" % (extra, caminho), 8)
+        if os.name == "nt" and os.path.exists(caminho):
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(caminho)])
+
     def _copiado_do_aparelho(self, txt, falhou):
         if not txt:
             return self.aviso_rapido("não foi possível ler a area de transferencia do aparelho" if falhou
                                      else "a area de transferencia do aparelho esta vazia (selecione um texto antes)", 5)
+        try:
+            if self.root.clipboard_get() == txt:
+                return  # ja esta no PC (Ctrl+C e a sincronia acharam o mesmo texto)
+        except tk.TclError:
+            pass
         self.root.clipboard_clear()
         self.root.clipboard_append(txt)
-        self.aviso_rapido("copiado do aparelho: %s" % resumo_texto(txt), 3)
+        self.aviso_rapido("copiado do aparelho para o PC: %s" % resumo_texto(txt), 3)
 
     def mudou_captura(self, _e=None):
         nome = self.cb_cap.get()
@@ -3364,7 +3677,8 @@ class App:
             if cap.nota and cap.via != "video":
                 via += " \u00b7 v\u00eddeo indispon\u00edvel, tentando de novo"
             instantaneo = self.inj.ok(cap.serial)
-            self.rodape.estado([
+            g = cap.gravacao
+            self.rodape.estado(([("Gravando %s %s" % (g.formato.upper(), gravacao.nome_do_tempo(g.duracao())), PERIGO)] if g else []) + [
                 (estado, visual.VERDE if estado == "Ao vivo" else visual.AMBAR),
                 ("%s \u00b7 %.0f fps" % (via, fps), None),
                 (clique, visual.VERDE if instantaneo else visual.AMBAR),
@@ -3374,6 +3688,8 @@ class App:
         if txt is not None:
             self.rodape.mensagem(txt, cor)
         self.root.title("Vision - %s%s" % (cap.serial or "sem aparelho", " (pausado)" if self.pausado else ""))
+        while self.gravacoes_prontas:
+            self._gravacao_pronta(*self.gravacoes_prontas.pop(0))
         self.root.after(400, self.rodape_tick)
 
 

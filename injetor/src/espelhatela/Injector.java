@@ -1,6 +1,8 @@
 package espelhatela;
 
 import android.content.ClipData;
+import android.content.ClipDescription;
+import android.os.Build;
 import android.os.IBinder;
 import android.os.SystemClock;
 import android.view.InputDevice;
@@ -32,6 +34,9 @@ import java.net.URLEncoder;
  *   v texto          cola o texto: area de transferencia + KEYCODE_PASTE (com acentos); sem
  *                    area de transferencia, digita o texto tecla a tecla
  *   g                le a area de transferencia; responde "CLIP texto" (URL) ou "CLIP" vazio
+ *   w                quando a area de transferencia mudou, sem ler o conteudo (no Android 12+ ler
+ *                    mostra o aviso "colou da area de transferencia"); responde "CLIPW marca",
+ *                    "CLIPW vazio" ou "CLIPW ?" (Android antigo, sem a hora: le o conteudo)
  *   q                encerra
  *
  * Responde "READY" ao iniciar e "ERR ..." quando um comando falha.
@@ -128,6 +133,9 @@ public final class Injector {
                 String lido = clipLe();
                 responde(lido == null ? "CLIP" : "CLIP " + URLEncoder.encode(lido, "UTF-8").replace("+", "%20"));
                 break;
+            case "w":
+                responde("CLIPW " + clipMarca());
+                break;
             case "q":
                 return false;
             default:
@@ -198,6 +206,18 @@ public final class Injector {
         } catch (Throwable t) {
             responde("ERR clip " + t);
             return false;
+        }
+    }
+
+    private static String clipMarca() {
+        if (Build.VERSION.SDK_INT < 26) {
+            return "?";
+        }
+        try {
+            ClipDescription d = (ClipDescription) chamaClip("getPrimaryClipDescription", null);
+            return d == null ? "vazio" : String.valueOf(d.getTimestamp());
+        } catch (Throwable t) {
+            return "?";
         }
     }
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.7 - gravação em MP4 volta a funcionar e Parar sempre à vista
+
+- **Gravar tela em MP4 falhava** com "No module named 'numpy'" (2.5 e 2.6) quando o vídeo já chegava no tamanho do arquivo: a gravação usava uma biblioteca que não vai dentro do Vision.exe. Corrigido; o GIF não era afetado.
+- **Barra de gravação**: enquanto grava, uma faixa vermelha acima do espelho mostra o formato e o tempo, com o botão **Parar e salvar**; vira "Salvando a gravação…" até o arquivo ficar pronto.
+- **F12** começa e para a gravação.
+
 ## 2.6 - captura onde quiser e folga para PC fraco
 
 - **Captura de tela onde quiser**: botão direito no ícone da captura (ou `Ctrl+Shift+S`) para **Salvar como** em PNG ou JPG, **Mudar a pasta das capturas**, abrir a pasta ou voltar para `Imagens\Vision`. O `Ctrl+S` passa a salvar na pasta escolhida.

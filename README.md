@@ -61,7 +61,7 @@ python espelha_tela.py
 | 🤖 | **Preparar para automação** | Desliga as animações, mantém a tela ligada e trava a rotação. Guarda os valores antigos para restaurar com um clique. |
 | 📦 | **Instalar / Desinstalar APK** | `adb install -r` com tratamento de downgrade e desinstalação de vários pacotes de uma vez. Também dá para **soltar o APK em cima do espelho**. |
 | 📁 | **Arquivos** | Navegar, baixar e enviar com barra de progresso e Cancelar, **arrastar arquivos do Explorer** para a pasta aberta, abrir no PC, criar pasta, renomear e excluir (em `/sdcard`, `/storage` e `/data/local/tmp`). |
-| 🎬 | **Gravar tela** | Grava o espelho em **MP4** ou **GIF** (até 60 s), com os **toques visíveis** se quiser, na pasta e com o nome que você escolher. |
+| 🎬 | **Gravar tela** | Grava o espelho em **MP4** ou **GIF** (até 60 s), com os **toques visíveis** se quiser, na pasta e com o nome que você escolher. Durante a gravação, uma barra vermelha acima do espelho mostra o tempo e o botão **Parar e salvar** (ou `F12`). |
 | 📊 | **Memória** | Gerenciador de tarefas com RSS por processo, PSS sob demanda, variação desde o início, gráficos e exportação para CSV. |
 | 🐞 | **Reportar bug** (F8) | Print, vídeo dos últimos 30 s, logcat e dados do aparelho/app numa pasta + `.zip`, com o texto do card do Jira (Descrição, Teste realizado, Resultado esperado e obtido) na área de transferência. |
 | 📈 | **Logcat ao vivo** | Log em tempo real com filtro por app, nível e busca; pausar, limpar e salvar. |
@@ -73,7 +73,7 @@ python espelha_tela.py
 | ⚙️ | **Configurações** | Liga e desliga cada ferramenta da barra lateral: cada usuário deixa à mostra só o que usa. |
 | 📷 | **Captura e tela cheia** | PNG na pasta que você escolher (padrão `Imagens\Vision`, Ctrl+S); `Ctrl+Shift+S` ou o botão direito no ícone salva como PNG/JPG onde quiser. Tela cheia (F11). |
 
-**Atalhos:** `Ctrl+V` cola no aparelho · `Ctrl+C` copia do aparelho · `F6` liga o seletor · `F8` reportar bug · `F9` mostra/oculta a barra lateral · `F11` tela cheia · `Ctrl+S` salva a captura · `Ctrl+Shift+S` salva a captura como · `Esc` sai do seletor.
+**Atalhos:** `Ctrl+V` cola no aparelho · `Ctrl+C` copia do aparelho · `F6` liga o seletor · `F8` reportar bug · `F9` mostra/oculta a barra lateral · `F11` tela cheia · `F12` começa e para a gravação · `Ctrl+S` salva a captura · `Ctrl+Shift+S` salva a captura como · `Esc` sai do seletor.
 
 ## 🎯 Seletor para o Maestro: exemplo
 

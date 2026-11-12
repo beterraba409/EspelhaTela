@@ -85,7 +85,7 @@ import janela_config  # noqa: E402  (ligar e desligar as ferramentas da barra la
 import janela_emuladores  # noqa: E402  (Androids virtuais dentro do Vision)
 import emulador_avd  # noqa: E402
 
-VERSAO = "2.6"
+VERSAO = "2.7"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -2513,7 +2513,7 @@ class App:
                 ("logcat", "logcat", "Exportar logcat", "Salva em arquivo o log dos \u00faltimos 2, 5 ou 10 minutos", self.menu_logcat),
                 ("aparelho", "aparelho", "App e aparelho", "Vers\u00e3o de qualquer app, abrir, parar, limpar dados, permiss\u00f5es e preparo para automa\u00e7\u00e3o", self.abre_painel),
                 ("arquivos", "arquivos", "Arquivos", "Pastas do aparelho: baixar, enviar, abrir e excluir", self.abre_arquivos),
-                ("gravar", "gravar", "Gravar tela", "Grava o que aparece no espelho em MP4 (v\u00eddeo) ou GIF (anima\u00e7\u00e3o curta)", self.menu_gravar),
+                ("gravar", "gravar", "Gravar tela", "Grava o que aparece no espelho em MP4 (v\u00eddeo) ou GIF (anima\u00e7\u00e3o curta). F12 come\u00e7a e para", self.menu_gravar),
                 ("memoria", "memoria", "Mem\u00f3ria", "Quanto cada app do aparelho est\u00e1 usando", self.abre_memoria),
                 ("emuladores", "emulador", "Emuladores", "Crie e ligue Androids virtuais (SmartPOS, celular, tablet) que aparecem no espelho", self.abre_emuladores)):
             b = self._ferramenta(self.caixa_ferr, icone, nome, "%s|%s" % (nome, dica), cmd)
@@ -2580,6 +2580,7 @@ class App:
         root.bind("<Key>", self.tecla_digitada)
         root.bind("<Control-s>", lambda e: self.salva())
         root.bind("<Control-S>", lambda e: self.salva_como())  # com Shift
+        root.bind("<F12>", lambda e: (self.menu_gravar() if self.cap.gravacao is not None or self.ativa("gravar") else None) or "break")
         root.bind("<F11>", lambda e: self.tela_cheia())
         root.bind("<F9>", lambda e: self.alterna_lateral())
         root.bind("<F6>", lambda e: self.alterna_seletor() if self.ativa("seletor") else None)
@@ -3532,7 +3533,43 @@ class App:
         if self.cap._av is not None or self.cap.frame is not None:
             self.cap.gravacao.quadro(self.cap._av if self.cap._av is not None else self.cap.frame)  # a tela como esta agora
         self.bt_grava.define(texto="Parar gravação", ativo=True)
-        self.aviso_rapido("gravando em %s: clique em Parar gravação para salvar" % formato.upper(), 4)
+        self._mostra_barra_gravacao(formato)
+
+    # barra "gravando" acima do espelho: o tempo e o Parar sempre a vista (a ferramenta pode estar oculta)
+    def _mostra_barra_gravacao(self, formato):
+        self._esconde_barra_gravacao()
+        f = visual.fontes(self.root)
+        barra = self.barra_grav = tk.Frame(self.centro, bg=PERIGO)
+        barra.pack(fill="x", padx=8, pady=(0, 4), before=self.area)
+        self.barra_grav_txt = tk.Label(barra, text="", bg=PERIGO, fg="#ffffff", font=(f["forte"], 9), anchor="w", padx=10, pady=5)
+        self.barra_grav_txt.pack(side="left", fill="x", expand=True)
+        bt = tk.Label(barra, text="■  Parar e salvar  (F12)", bg="#ffffff", fg=PERIGO, font=(f["forte"], 9), padx=10, pady=2, cursor="hand2")
+        bt.pack(side="right", padx=6, pady=4)
+        bt.bind("<Button-1>", lambda e: self.parar_gravacao())
+        self.barra_grav_bt = bt
+        self._barra_grav_formato = formato.upper()
+        self._tique_barra_gravacao()
+
+    def _tique_barra_gravacao(self):
+        barra, g = getattr(self, "barra_grav", None), self.cap.gravacao
+        if barra is None or g is None:
+            return
+        texto = "●  Gravando %s  ·  %s" % (self._barra_grav_formato, gravacao.nome_do_tempo(g.duracao()))
+        if g.formato == "gif":
+            texto += "  (até %s)" % gravacao.nome_do_tempo(gravacao.LIMITE_GIF)
+        try:
+            self.barra_grav_txt.configure(text=texto)
+            self.root.after(500, self._tique_barra_gravacao)
+        except tk.TclError:
+            pass
+
+    def _esconde_barra_gravacao(self):
+        barra, self.barra_grav = getattr(self, "barra_grav", None), None
+        if barra is not None:
+            try:
+                barra.destroy()
+            except tk.TclError:
+                pass
 
     def _liga_toques(self, serial):
         """Liga o "mostrar toques" do Android durante a gravacao, guardando o valor de antes."""
@@ -3569,6 +3606,9 @@ class App:
         g.parar()
         self._devolve_toques()
         self.bt_grava.define(texto="Salvando…", ativo=False)
+        if getattr(self, "barra_grav", None) is not None:
+            self.barra_grav_txt.configure(text="Salvando a gravação…")
+            self.barra_grav_bt.pack_forget()
         self.aviso_rapido("salvando a gravação…", 30)
 
     def _gravacao_pronta(self, caminho, erro, motivo):
@@ -3576,6 +3616,8 @@ class App:
             self.cap.gravacao = None  # parou sozinha (limite do GIF)
         self._devolve_toques()
         self.bt_grava.define(texto="Gravar tela", ativo=False)
+        if self.cap.gravacao is None:
+            self._esconde_barra_gravacao()
         if erro:
             return self.aviso_rapido("a gravação falhou: %s" % erro, 8)
         extra = " (limite de %d s do GIF)" % gravacao.LIMITE_GIF if motivo == "limite" else ""

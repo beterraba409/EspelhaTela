@@ -1045,6 +1045,44 @@ class QuadroCompartilhado(unittest.TestCase):
             self.assertGreater(g.gravados, 1)
 
 
+class GravarSemNumpy(unittest.TestCase):
+    """O Vision.exe nao leva numpy: gravar MP4 com o video ja no tamanho do arquivo quebrava na 2.5/2.6."""
+
+    def test_mp4_com_quadro_no_tamanho_do_arquivo_e_tela_parada(self):
+        import time
+        import av
+        from PIL import Image
+        import gravacao as G
+        quadros = [av.VideoFrame.from_image(Image.new("RGB", (352, 640), (i * 80, 40, 200))).reformat(format="yuv420p")
+                   for i in range(3)]
+        guardado = sys.modules.get("numpy")
+        sys.modules["numpy"] = None  # import numpy falha, como no .exe
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                c = os.path.join(d, "x.mp4")
+                g = G.Gravacao(c, "mp4")
+                for fr in quadros:
+                    g.quadro(fr)
+                    time.sleep(0.25)
+                time.sleep(1.3)  # tela parada: o ultimo quadro e repetido
+                g.parar()
+                g.thread.join(30)
+                self.assertEqual(g.erro, "")
+                if guardado is not None:
+                    sys.modules["numpy"] = guardado
+                with av.open(c) as ct:
+                    s = ct.streams.video[0]
+                    n = sum(1 for _ in ct.decode(s))
+                    self.assertEqual((s.width, s.height), (352, 640))
+                    self.assertGreaterEqual(n, 5)
+                    self.assertGreater(float(ct.duration) / 1e6, 1.5)
+        finally:
+            if guardado is not None:
+                sys.modules["numpy"] = guardado
+            else:
+                sys.modules.pop("numpy", None)
+
+
 class CapturaOndeQuiser(unittest.TestCase):
     """Vision 2.6: captura de tela na pasta escolhida, em PNG ou JPG."""
 

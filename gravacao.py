@@ -139,18 +139,20 @@ class Gravacao:
                 pts = max(int(t * 1000), ultimo_pts + 1)
                 if anterior is not None:  # tela parada: repete o quadro, para a duracao do MP4 ficar certa em qualquer player
                     for extra in range(ultimo_pts + REPETE_MS, pts - REPETE_MS // 2, REPETE_MS):
-                        rep = anterior.reformat(format="yuv420p")
-                        rep.pts, rep.time_base = extra, fractions.Fraction(1, 1000)
-                        for pkt in stream.encode(rep):
+                        # o mesmo quadro (ja em yuv420p no tamanho do video) com outro instante: o codificador
+                        # guarda uma referencia aos dados no envio, entao reenviar o objeto e seguro
+                        anterior.pts, anterior.time_base = extra, fractions.Fraction(1, 1000)
+                        for pkt in stream.encode(anterior):
                             saida.mux(pkt)
                 if abs(fr.width / max(1, fr.height) - stream.width / max(1, stream.height)) > 0.02:
                     fr = av.VideoFrame.from_image(encaixa(self._rgb(fr), stream.width, stream.height))  # girou: sem esticar
                 if self._conv is None:
                     from av.video.reformatter import VideoReformatter
                     self._conv = VideoReformatter()
+                # quando o video ja chega no tamanho e formato do arquivo, o reformat devolve o proprio quadro
+                # (o mesmo que a tela usa). Mudar so o instante dele e inofensivo para a tela; nada de numpy
+                # aqui: ele nao vai dentro do Vision.exe (na 2.5 isso quebrava a gravacao em .mp4)
                 novo = self._conv.reformat(fr, width=stream.width, height=stream.height, format="yuv420p")
-                if novo is fr:  # nada a converter: o reformat devolve o proprio quadro, que a tela tambem usa
-                    novo = av.VideoFrame.from_ndarray(fr.to_ndarray(), format="yuv420p")
                 novo.pts, novo.time_base = pts, fractions.Fraction(1, 1000)
                 ultimo_pts, anterior = pts, novo
                 for pkt in stream.encode(novo):

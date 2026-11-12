@@ -7,6 +7,7 @@ import hashlib
 import os
 import shutil
 import subprocess
+import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 import zipfile
@@ -153,11 +154,20 @@ def baixa(url, destino, sha1="", total=0, progresso=lambda feito, total: None, c
     parcial = destino + ".part"
     os.makedirs(os.path.dirname(destino) or ".", exist_ok=True)
     feito = os.path.getsize(parcial) if os.path.isfile(parcial) else 0
+    if total and feito >= total:  # ja tinha chegado tudo (fechou durante a conferencia): so confere
+        return _confere(parcial, destino, sha1)
     headers = {"User-Agent": "Vision"}
     if feito:
         headers["Range"] = "bytes=%d-" % feito
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=60) as r:
+    try:
+        r = urllib.request.urlopen(req, timeout=60)
+    except urllib.error.HTTPError as e:
+        if e.code != 416 or not feito:
+            raise
+        os.remove(parcial)  # 416: o pedaco guardado nao serve mais; recomeca do zero
+        return baixa(url, destino, sha1, total, progresso, cancelado)
+    with r:
         if feito and r.status != 206:  # o servidor ignorou o Range: recomeca
             feito = 0
         modo = "ab" if feito else "wb"
@@ -171,6 +181,10 @@ def baixa(url, destino, sha1="", total=0, progresso=lambda feito, total: None, c
                 f.write(bloco)
                 feito += len(bloco)
                 progresso(feito, total)
+    return _confere(parcial, destino, sha1)
+
+
+def _confere(parcial, destino, sha1):
     if sha1 and sha1_arquivo(parcial) != sha1:
         os.remove(parcial)
         raise ValueError("o arquivo baixado veio corrompido (checksum diferente); tente de novo")

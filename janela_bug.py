@@ -98,8 +98,9 @@ class Coleta:
 class JanelaBug:
     """`ao_gerar(dados)` com titulo, campos, anexos escolhidos e a pasta; chamado ao clicar em Gerar."""
 
-    def __init__(self, raiz, config, serial, coleta, ao_gerar, icone=None):
-        self.config, self.coleta, self.ao_gerar = config, coleta, ao_gerar
+    def __init__(self, raiz, config, serial, coleta, ao_gerar, icone=None, ao_cancelar=None):
+        self.config, self.coleta, self.ao_gerar, self.ao_cancelar = config, coleta, ao_gerar, ao_cancelar
+        self.gerou = False
         w = self.win = tk.Toplevel(raiz)
         w.title("Reportar bug")
         if icone:
@@ -168,6 +169,7 @@ class JanelaBug:
         self.bt_ok.pack(side="right")
         visual.Botao(botoes, "fechar", "Cancelar", comando=w.destroy, largura=110, altura=38).pack(side="right", padx=(0, 8))
         w.bind("<Escape>", lambda e: w.destroy())
+        w.bind("<Destroy>", self._destruida)  # Cancelar, Esc ou o X: o que foi guardado no clique e apagado
         w.update_idletasks()
         w.geometry("640x%d+%d+%d" % (min(w.winfo_reqheight(), w.winfo_screenheight() - 80), raiz.winfo_rootx() + 40, max(0, raiz.winfo_rooty() - 10)))
         ent.focus_set()
@@ -201,5 +203,11 @@ class JanelaBug:
             "pasta": self.var_pasta.get(),
         }
         self.config.update(pasta_bugs=dados["pasta"], guardar_recentes=bool(self.var_memoria.get()))
+        self.gerou = True
         self.win.destroy()
         self.ao_gerar(dados)
+
+    def _destruida(self, e):
+        if e.widget is self.win and not self.gerou and self.ao_cancelar:
+            self.gerou = True  # uma vez so
+            self.ao_cancelar()

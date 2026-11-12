@@ -82,12 +82,12 @@ def ultima_versao(repo, prefixo_tag, prefixo_arquivo, token=None, timeout=15):
             dados = json.load(r)
     except urllib.error.HTTPError as e:
         if e.code in (401, 403) and token:
-            raise RuntimeError("o token do GitHub foi recusado (vencido ou sem acesso ao repositorio)")
+            raise RuntimeError("o token do GitHub foi recusado (vencido ou sem acesso ao reposit\u00f3rio)")
         if e.code == 404:
-            raise RuntimeError("repositorio nao encontrado" + ("" if token else " (privado? falta o token)"))
+            raise RuntimeError("reposit\u00f3rio n\u00e3o encontrado" + ("" if token else " (privado? falta o token)"))
         raise RuntimeError("o GitHub respondeu %d" % e.code)
     except (urllib.error.URLError, OSError) as e:
-        raise RuntimeError("sem conexao com o GitHub (%s)" % getattr(e, "reason", e))
+        raise RuntimeError("sem conex\u00e3o com o GitHub (%s)" % getattr(e, "reason", e))
     return escolhe_release(dados, prefixo_tag, prefixo_arquivo)
 
 

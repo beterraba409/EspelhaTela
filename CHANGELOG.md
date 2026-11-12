@@ -1,5 +1,19 @@
 # Changelog
 
+## 2.5 - revisão geral e correções
+
+- **Fechamento inesperado do Vision**: a tela, a gravação e a memória dos últimos 30 s (ligada por padrão desde a 2.2) convertiam o mesmo quadro de vídeo ao mesmo tempo, e isso podia derrubar o programa sem aviso. Cada uma agora tem o seu próprio conversor.
+- **Menus**: itens indisponíveis não aparecem mais "apagados em relevo" (efeito do Windows no tema escuro); viram uma linha informativa ou somem.
+- **Janelas presas ao aparelho**: Arquivos, App e aparelho e Memória continuam no aparelho com que foram abertas, mesmo trocando o aparelho na janela principal (antes, excluir arquivos ou limpar dados podia ir para o outro aparelho).
+- **Preparar para automação**: os valores originais só são apagados depois de restaurar com sucesso, e preparar espera a leitura do aparelho.
+- **Capturas e CSV de aparelho por Wi-Fi** (serial com `:`) eram gravados vazios; agora saem com o nome certo. O Explorer abre certo em caminhos com espaço.
+- **Fechar, trocar o tema ou atualizar** com emulador ligado ou cópia em andamento: perguntam antes, e cancelar não deixa dois Vision abertos.
+- **Buscar atualizações** sem internet ou atrás de proxy não deixa mais o Vision preso em "buscando atualizações".
+- **Emuladores**: boot que passa do limite desliga o emulador de verdade; dois ligados seguidos não disputam a mesma porta; o perfil não muda no meio do download; conferência de disco pelo que vai baixar; download interrompido no fim não trava mais.
+- **Gravação**: girar o aparelho no meio não estica mais o vídeo (faixas pretas); "mostrar toques" volta ao valor de antes mesmo parando logo.
+- **Reportar bug cancelado** e "Abrir no PC" não deixam mais arquivos temporários para trás.
+- Logcat ao vivo mantém o aviso quando o aparelho desconecta; Wi-Fi não dispara dois pareamentos com Enter repetido; textos com acentos e plurais corretos ("1 item", "3 itens").
+
 ## 2.4 - Emuladores Android dentro do Vision
 
 - **Emuladores** (nova ferramenta): cria e liga Androids virtuais que aparecem no espelho do Vision como um aparelho, com todas as ferramentas (toque, Seletor, Reportar bug, Logcat, Arquivos, instalar APK soltando no espelho).

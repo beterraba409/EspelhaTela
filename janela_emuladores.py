@@ -54,8 +54,9 @@ class Gerente:
 
     def inicia(self, nome, modo="normal", instantaneo=None):
         """Liga; com `instantaneo`, carrega aquele estado salvo assim que o Android terminar de ligar."""
-        with self.lock:
+        with self.lock:  # as do adb e as dos que o Vision acabou de ligar (ainda nao aparecem no adb)
             usadas = [int(s.split("-")[1]) for s in self.ligados]
+            usadas += [int(m["serial"].split("-")[1]) for m in self.meus.values() if m["proc"].poll() is None]
         porta = P.porta_livre(usadas)
         proc, serial, log = P.inicia(self.raiz, nome, porta, modo)
         with self.lock:
@@ -101,7 +102,12 @@ class Gerente:
                     m["estado"] = "pronto"
                     self.ao_pronto(m["serial"])
                 elif time.time() - m["t0"] > LIMITE_BOOT:
-                    m["estado"], m["erro"] = "erro", "não terminou de ligar em %d s" % LIMITE_BOOT
+                    P.desliga(self.rodar, self.adb, m["serial"])  # nao deixa um emulador fantasma prendendo o AVD
+                    try:
+                        m["proc"].wait(15)
+                    except Exception:  # noqa: BLE001
+                        m["proc"].kill()
+                    m["estado"], m["erro"] = "erro", "não terminou de ligar em %d s (desliguei; tente “Apagar os dados e ligar”)" % LIMITE_BOOT
             for _ in range(20):
                 if self.parar:
                     return
@@ -206,11 +212,19 @@ class JanelaEmuladores:
 
     def _atualiza(self):
         try:
-            nomes = {a["nome"] for a in A.lista()}
+            nomes = {a["nome"] for a in A.lista(com_tamanho=False)}
             if nomes != set(self.cartoes):
                 self.monta()
             for nome in self.cartoes:
                 self._pinta(nome)
+        except tk.TclError:
+            return  # janela fechada
+        except Exception as e:  # noqa: BLE001  (pasta de AVD apagada no meio, por exemplo): avisa e segue
+            try:
+                self.rodape.configure(text="erro ao atualizar: %s" % str(e)[:120], fg=visual.PERIGO)
+            except tk.TclError:
+                return
+        try:
             self.win.after(1500, self._atualiza)
         except tk.TclError:
             pass
@@ -218,7 +232,7 @@ class JanelaEmuladores:
     # ---- acoes
     def _menu_estados(self, nome, estados, bt):
         """Ligar e ja voltar a um estado salvo (ex.: SmartPOS ativado e logado)."""
-        m = tk.Menu(self.win, tearoff=0, bg=visual.BG2, fg=visual.FG, activebackground=visual.ACENTO, activeforeground="#ffffff")
+        m = visual.menu(self.win)
         for e in estados:
             m.add_command(label="Ligar em “%s”" % e, command=lambda e=e: self._liga(nome, instantaneo=e))
         m.tk_popup(bt.winfo_rootx(), bt.winfo_rooty() + bt.winfo_height())
@@ -243,28 +257,35 @@ class JanelaEmuladores:
     def _menu(self, a, bt):
         nome = a["nome"]
         estado, serial = self.g.estado(nome)
-        m = tk.Menu(self.win, tearoff=0, bg=visual.BG2, fg=visual.FG, activebackground=visual.ACENTO, activeforeground="#ffffff")
+        m = visual.menu(self.win)
         estados = A.instantaneos(a["pasta"])
         if estado == "pronto":
             m.add_command(label="Salvar estado agora…", command=lambda: self._salva(serial))
-            sub = tk.Menu(m, tearoff=0, bg=visual.BG2, fg=visual.FG, activebackground=visual.ACENTO, activeforeground="#ffffff")
-            for e in estados:
-                sub.add_command(label=e, command=lambda e=e: self._console(P.carrega_estado, serial, e, "restaurado: %s" % e))
-            m.add_cascade(label="Voltar a um estado salvo", menu=sub, state="normal" if estados else "disabled")
-        else:
-            sub = tk.Menu(m, tearoff=0, bg=visual.BG2, fg=visual.FG, activebackground=visual.ACENTO, activeforeground="#ffffff")
-            for e in estados:
-                sub.add_command(label=e, command=lambda e=e: self._liga(nome, instantaneo=e))
-            m.add_cascade(label="Ligar num estado salvo", menu=sub, state="normal" if estados else "disabled")
+            if estados:
+                sub = visual.menu(m)
+                for e in estados:
+                    sub.add_command(label=e, command=lambda e=e: self._console(P.carrega_estado, serial, e, "restaurado: %s" % e))
+                m.add_cascade(label="Voltar a um estado salvo", menu=sub)
+        elif estado in ("desligado", "erro"):
+            if estados:
+                sub = visual.menu(m)
+                for e in estados:
+                    sub.add_command(label=e, command=lambda e=e: self._liga(nome, instantaneo=e))
+                m.add_cascade(label="Ligar num estado salvo", menu=sub)
+            else:
+                visual.item_info(m, "Nenhum estado salvo ainda: ligue e use “Salvar estado agora”")
             m.add_command(label="Apagar os dados e ligar (de fábrica)", command=lambda: self._apaga_e_liga(nome))
         if estados:
-            sub2 = tk.Menu(m, tearoff=0, bg=visual.BG2, fg=visual.FG, activebackground=visual.ACENTO, activeforeground="#ffffff")
+            sub2 = visual.menu(m)
             for e in estados:
                 sub2.add_command(label=e, command=lambda e=e: self._apaga_estado(a, e))
             m.add_cascade(label="Excluir um estado salvo", menu=sub2)
         m.add_separator()
         m.add_command(label="Abrir a pasta do emulador", command=lambda: os.startfile(a["pasta"]) if os.name == "nt" else None)
-        m.add_command(label="Excluir emulador…", command=lambda: self._exclui(a), state="normal" if estado == "desligado" else "disabled")
+        if estado in ("desligado", "erro"):
+            m.add_command(label="Excluir emulador…", command=lambda: self._exclui(a))
+        else:
+            visual.item_info(m, "Para excluir, desligue o emulador")
         m.tk_popup(bt.winfo_rootx(), bt.winfo_rooty() + bt.winfo_height())
 
     def _salva(self, serial):
@@ -393,12 +414,15 @@ class JanelaCriar:
         self.bt_cancelar = visual.Botao(botoes, "fechar", "Cancelar", comando=self._fecha, largura=120, altura=38)
         self.bt_cancelar.pack(side="right", padx=(0, 8))
         w.protocol("WM_DELETE_WINDOW", self._fecha)
+        w.bind("<Destroy>", lambda e: setattr(self, "cancelar", True) if e.widget is w else None)  # tambem quando o pai fecha
         self._perfil("smartpos")
         threading.Thread(target=self._carrega, daemon=True).start()
         w.after(150, self._consome)
 
     # ---- montagem
     def _perfil(self, chave):
+        if getattr(self, "trabalhando", False):
+            return  # baixando/criando: o perfil escolhido nao muda mais
         self.perfil = chave
         p = A.PERFIS[chave]
         for k, c in self.cartoes.items():
@@ -436,8 +460,10 @@ class JanelaCriar:
 
     def _sugere_nome(self):
         v = self._escolhida()
-        if v:
-            self.var_nome.set(A.sugere_nome(self.perfil, v[0], {a["nome"] for a in A.lista()}))
+        atual = self.var_nome.get().strip()
+        if v and (not atual or atual == getattr(self, "_sugerido", None)):  # so troca o nome que o Vision sugeriu
+            self._sugerido = A.sugere_nome(self.perfil, v[0], {a["nome"] for a in A.lista(com_tamanho=False)})
+            self.var_nome.set(self._sugerido)
         self._mostra_requisitos()
 
     def _a_baixar(self):
@@ -445,11 +471,24 @@ class JanelaCriar:
         emu = 0 if os.path.isfile(S.exe_emulador(self.g.raiz)) else (self.catalogo[0]["size"] if self.catalogo and self.catalogo[0] else 0)
         return emu, (v[3] if v else 0)
 
+    @staticmethod
+    def _precisa_gb(emu, img, dados):
+        """Zip + descompactado durante a troca (~2,2x o download), mais o armazenamento do emulador."""
+        return 2.2 * (emu + img) / (1 << 30) + dados + 1
+
     def _mostra_requisitos(self):
         for c in self.req.winfo_children():
             c.destroy()
         emu, img = self._a_baixar()
-        itens = getattr(self, "reqs", None) or [(None, "Verificando", "aceleração, memória e disco…")]
+        itens = list(getattr(self, "reqs", None) or [(None, "Verificando", "aceleração e memória…")])
+        try:
+            dados = int(self.var_dados.get())
+        except (ValueError, tk.TclError):
+            dados = 6
+        livre, precisa = S.disco_livre_gb(self.g.raiz), self._precisa_gb(emu, img, dados)
+        itens = [x for x in itens if x[1] != "Disco"]
+        if livre is not None:
+            itens.append((livre >= precisa, "Disco", "%.0f GB livres (precisa de uns %.0f GB)" % (livre, precisa)))
         for ok, item, det in itens:
             cor = visual.VERDE if ok else (visual.FG2 if ok is None else visual.PERIGO)
             sinal = "✔" if ok else ("•" if ok is None else "✕")
@@ -483,7 +522,6 @@ class JanelaCriar:
         else:
             erro = ""
         self.q.put(("catalogo", cat, erro))
-        emu, img = 0, 0
         self.q.put(("reqs", S.requisitos(self.g.raiz, 2.5)))
 
     def _consome(self):
@@ -503,11 +541,13 @@ class JanelaCriar:
                 elif m[0] == "fim":
                     nome, erro = m[1], m[2]
                     if erro:
+                        self.trabalhando = False
                         self.status.configure(text=erro, fg=visual.PERIGO)
                         self.bt_ok.define(desativado=False)
                         self.prog.pack_forget()
                     else:
                         ligar = self.var_ligar.get()
+                        self.criado = True
                         self.win.destroy()
                         if self.ao_criar:
                             self.ao_criar(nome, ligar)
@@ -525,7 +565,17 @@ class JanelaCriar:
             return self.status.configure(text="Nome: só letras, números, ponto, hífen ou sublinhado.", fg=visual.PERIGO)
         if nome in {a["nome"] for a in A.lista()}:
             return self.status.configure(text="Já existe um emulador com esse nome.", fg=visual.PERIGO)
+        try:
+            ram, dados = int(self.var_ram.get()) * 1024, int(self.var_dados.get())
+            if not (2 <= ram // 1024 <= 16 and 2 <= dados <= 256):
+                raise ValueError()
+        except (ValueError, tk.TclError):
+            return self.status.configure(text="Mem\u00f3ria (2 a 16 GB) e armazenamento (2 a 256 GB) precisam ser n\u00fameros.", fg=visual.PERIGO)
         emu, img = self._a_baixar()
+        livre = S.disco_livre_gb(self.g.raiz)
+        precisa = self._precisa_gb(emu, img, dados)
+        if livre is not None and livre < precisa:
+            return self.status.configure(text="Falta espa\u00e7o: precisa de uns %.0f GB e h\u00e1 %.0f GB livres." % (precisa, livre), fg=visual.PERIGO)
         if (emu or img) and not self.var_lic.get():
             return self.status.configure(text="Para baixar, aceite a licença do Android SDK.", fg=visual.PERIGO)
         if (emu or img) and not self.catalogo:
@@ -533,10 +583,10 @@ class JanelaCriar:
         self.bt_ok.define(desativado=True)
         self.prog.pack(fill="x", padx=20, pady=(8, 0), before=self.status)
         api, tag = v[0], v[1]
-        ram, dados = int(self.var_ram.get()) * 1024, int(self.var_dados.get())
-        threading.Thread(target=self._trabalho, args=(nome, api, tag, ram, dados, emu, img), daemon=True).start()
+        self.trabalhando = True
+        threading.Thread(target=self._trabalho, args=(nome, self.perfil, api, tag, ram, dados, emu, img), daemon=True).start()
 
-    def _trabalho(self, nome, api, tag, ram, dados, emu, img):
+    def _trabalho(self, nome, perfil, api, tag, ram, dados, emu, img):
         raiz = self.g.raiz
         total = emu + img
         try:
@@ -561,7 +611,7 @@ class JanelaCriar:
             if emu:
                 self.g.raiz = raiz  # agora este SDK tem emulador
             self.q.put(("prog", 95, "Criando o emulador…"))
-            A.cria(nome, self.perfil, api, ram=ram, dados=dados, tag=tag)
+            A.cria(nome, perfil, api, ram=ram, dados=dados, tag=tag)
             self.q.put(("fim", nome, ""))
         except S.Cancelado:
             self.q.put(("fim", nome, "Cancelado. O que já foi baixado fica guardado e o próximo download continua dali."))

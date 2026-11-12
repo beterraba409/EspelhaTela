@@ -222,6 +222,18 @@ class Rolavel(tk.Frame):
             w = getattr(w, "master", None)
 
 
+def menu(pai):
+    """Menu de contexto no tema atual."""
+    return tk.Menu(pai, tearoff=0, bg=BG2, fg=FG, activebackground=ACENTO, activeforeground="#ffffff",
+                   disabledforeground=FG2, bd=0)
+
+
+def item_info(m, texto):
+    """Linha so informativa num menu. Nao usa state="disabled": no Windows o Tk desenha o item
+    desabilitado em relevo (sombra clara), que fica borrado no tema escuro."""
+    m.add_command(label=texto, foreground=FG2, activebackground=BG2, activeforeground=FG2, command=lambda: None)
+
+
 def titulo_secao(pai, texto):
     """Titulo de secao: barra de destaque a esquerda e texto maior."""
     c = tk.Canvas(pai, height=28, bg=BG, highlightthickness=0, bd=0)

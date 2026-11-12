@@ -105,7 +105,10 @@ class Transferencia:
                 except Exception:  # noqa: BLE001
                     pass
                 if self.cancelado:
-                    self._proc.wait(5)
+                    try:
+                        self._proc.wait(5)
+                    except subprocess.TimeoutExpired:
+                        self._proc.kill()  # o adb demorou a morrer: forca, e limpa do mesmo jeito
                     if c.limpar:
                         try:
                             c.limpar()

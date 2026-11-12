@@ -56,6 +56,8 @@ class JanelaLogcat:
         self.pids = None
         self.proc = None
         self.parar = False
+        self.acabou = False  # o logcat terminou (aparelho desconectou): fica avisado no rodape
+        self.app_atual = pacote_em_foco or TODOS
         w = self.win = tk.Toplevel(raiz)
         w.title("Logcat ao vivo - %s" % serial)
         if icone:
@@ -136,7 +138,7 @@ class JanelaLogcat:
 
     def _pids_loop(self):
         while not self.parar:
-            app = self.var_app.get().strip()
+            app = self.app_atual  # copia feita na thread do Tk (_muda_app): daqui nao se le widget
             if app and app != TODOS:
                 try:
                     _, out, _ = self.rodar([self.adb, "-s", self.serial, "shell", "pidof %s" % app], timeout=10)
@@ -160,7 +162,7 @@ class JanelaLogcat:
         return None if not app or app == TODOS else (self.pids or set())
 
     def _muda_app(self, inicio=False):
-        app = self.var_app.get().strip()
+        app = self.app_atual = self.var_app.get().strip()
         self.pids = None if (not app or app == TODOS) else set()
         if not inicio:
             self.rodape.configure(text="buscando o processo de %s\u2026" % app if self.pids is not None else "")
@@ -201,12 +203,12 @@ class JanelaLogcat:
     def _consome(self):
         if self.parar:
             return
-        novos, refazer, acabou = [], False, False
+        novos, refazer = [], False
         try:
             for _ in range(5000):
                 item = self.q.get_nowait()
                 if item is None:
-                    acabou = True
+                    self.acabou = True
                 elif item == "refaz":
                     refazer = True
                 else:
@@ -224,12 +226,12 @@ class JanelaLogcat:
                 if self.var_fim.get():
                     self.txt.see("end")
         estado = "pausado (as linhas continuam chegando e aparecem ao retomar)" if self.pausado else "ao vivo"
-        if acabou:
+        if self.acabou:
             estado = "o logcat parou (o aparelho desconectou?)"
         app = self.var_app.get().strip()
         filtro = ("%s (%s)" % (app, ", ".join(str(p) for p in sorted(self.pids)) if self.pids else "%s (n\u00e3o est\u00e1 rodando)" % app)) if self._filtro_pids() is not None else TODOS.lower()
         self.rodape.configure(text="%s  \u00b7  %d linhas guardadas  \u00b7  %s" % (estado, len(self.linhas), filtro),
-                              fg=visual.PERIGO if acabou else visual.FG2)
+                              fg=visual.PERIGO if self.acabou else visual.FG2)
         self.win.after(150, self._consome)
 
     def _rolou(self, primeiro, ultimo):

@@ -174,7 +174,7 @@ def seletores(nos, i, tela):
         saida += _por_id(nos, j, rotulo, conferir=True)
     c = clicavel(nos, i)
     if c is not None and c != j and nos[c]["resource-id"].strip():
-        saida += _por_id(nos, c, "id do elemento clicavel que contem este")
+        saida += _por_id(nos, c, "id do elemento clic\u00e1vel que cont\u00e9m este")
     t = i if no["text"].strip() else descendente_com_texto(nos, i)
     if t is not None:
         saida.append(("texto", "- tapOn: %s" % yaml_str(nos[t]["text"])))
@@ -187,7 +187,7 @@ def seletores(nos, i, tela):
     if tela and tela[0] and tela[1]:
         cx = round(100.0 * (b[0] + b[2]) / 2 / tela[0])
         cy = round(100.0 * (b[1] + b[3]) / 2 / tela[1])
-        saida.append(("ponto (ultimo recurso)", "- tapOn:\n    point: \"%d%%,%d%%\"" % (cx, cy)))
+        saida.append(("ponto (\u00faltimo recurso)", "- tapOn:\n    point: \"%d%%,%d%%\"" % (cx, cy)))
     return saida
 
 
@@ -218,7 +218,7 @@ def ler_tela(rodar, adb, serial):
                 err = err or err2 or out.strip()
             if xml:
                 return le_nos(xml), ""
-            erro = (err or out).strip()[:160] or "o aparelho nao devolveu a arvore da tela"
+            erro = (err or out).strip()[:160] or "o aparelho n\u00e3o devolveu a \u00e1rvore da tela"
         except Exception as e:  # noqa: BLE001
             erro = str(e)[:160]
     return None, erro

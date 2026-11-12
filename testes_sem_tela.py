@@ -134,10 +134,10 @@ class TestSeletor(unittest.TestCase):
         i = self._idx("title-button-teste-conexao")
         sug = dict(S.seletores(self.nos, i, (720, 1280)))
         self.assertEqual(sug["id"], '- tapOn:\n    id: "title-button-teste-conexao"')
-        self.assertEqual(sug["id do elemento clicavel que contem este"], '- tapOn:\n    id: "button-teste-conexao"')
+        self.assertEqual(sug["id do elemento clic\u00e1vel que cont\u00e9m este"], '- tapOn:\n    id: "button-teste-conexao"')
         self.assertEqual(sug["texto"], '- tapOn: "Conexão com a internet"')
         self.assertNotIn("accessibilityLabel", sug)  # content-desc igual ao testID nao vira sugestao
-        self.assertEqual(sug["ponto (ultimo recurso)"], '- tapOn:\n    point: "33%,45%"')
+        self.assertEqual(sug["ponto (\u00faltimo recurso)"], '- tapOn:\n    point: "33%,45%"')
 
     def test_id_repetido_ganha_index_e_texto_escapado(self):
         i = self._idx(texto='R$ 10,00 "promo"')
@@ -951,6 +951,98 @@ class Emuladores(unittest.TestCase):
                             .startswith("emulator-5554  \u00b7  Emulador \u00b7 SmartPOS"))
         finally:
             E.ROTULOS_EMULADOR.clear()
+
+
+class Revisao24(unittest.TestCase):
+    """Regressoes da revisao do programa (Vision 2.4)."""
+
+    def test_serial_de_wifi_vira_nome_de_arquivo(self):
+        import espelha_tela as E
+        self.assertEqual(E.para_arquivo("192.168.0.5:5555"), "192.168.0.5_5555")
+        self.assertEqual(E.para_arquivo(""), "aparelho")
+
+    def test_plural(self):
+        import espelha_tela as E
+        self.assertEqual(E.conta(1, "item", "itens"), "1 item")
+        self.assertEqual(E.conta(3, "item", "itens"), "3 itens")
+        self.assertEqual(E.conta(0, "pasta", "pastas"), "0 pastas")
+
+    def test_quadro_girado_nao_estica(self):
+        from PIL import Image
+        import gravacao as G
+        deitado = Image.new("RGB", (640, 304), (255, 255, 255))
+        img = G.encaixa(deitado, 304, 640)  # video comecou em pe
+        self.assertEqual(img.size, (304, 640))
+        self.assertEqual(img.getpixel((150, 5)), (0, 0, 0))  # faixa preta em cima
+        self.assertEqual(img.getpixel((150, 320)), (255, 255, 255))  # a imagem no meio
+
+    def test_download_que_ja_tinha_terminado(self):
+        import hashlib
+        import emulador_sdk as S
+        dados = b"x" * 5000
+        with tempfile.TemporaryDirectory() as d:
+            destino = os.path.join(d, "a.zip")
+            with open(destino + ".part", "wb") as f:
+                f.write(dados)  # fechou durante a conferencia: o .part esta inteiro
+            # sem rede: se tentasse baixar de novo, a URL invalida daria erro
+            S.baixa("http://127.0.0.1:9/nada", destino, hashlib.sha1(dados).hexdigest(), len(dados))
+            self.assertEqual(open(destino, "rb").read(), dados)
+
+    def test_porta_conta_os_que_o_vision_acabou_de_ligar(self):
+        import types
+        import emulador_proc as P
+        import janela_emuladores as JE
+        g = JE.Gerente.__new__(JE.Gerente)  # sem a thread que consulta o adb
+        g.lock, g.ligados, g.raiz = threading.Lock(), {}, "C:/sdk"
+        g.meus = {"a": {"serial": "emulator-5554", "proc": types.SimpleNamespace(poll=lambda: None)}}
+        portas = []
+        original = P.inicia
+        P.inicia = lambda raiz, nome, porta, modo: (types.SimpleNamespace(poll=lambda: None), "emulator-%d" % porta, "x.log") if not portas.append(porta) else None
+        livre = P.porta_em_uso
+        P.porta_em_uso = lambda p: False
+        try:
+            g.inicia("b")
+        finally:
+            P.inicia, P.porta_em_uso = original, livre
+        self.assertEqual(portas, [5556])
+
+
+class QuadroCompartilhado(unittest.TestCase):
+    """O mesmo quadro na tela, na gravacao e nos ultimos 30 s ao mesmo tempo (na 2.4 derrubava o Python)."""
+
+    def test_tres_threads_convertendo_o_mesmo_quadro(self):
+        import time
+        import av
+        import numpy as np
+        import espelha_tela as E
+        import gravacao as G
+        import recentes as R
+        quadros = [av.VideoFrame.from_ndarray(np.random.randint(0, 255, (640, 304, 3), np.uint8), format="rgb24")
+                   .reformat(format="yuv420p") for _ in range(3)]
+        cap = E.Captura("adb", "falso", 0.05)
+        with tempfile.TemporaryDirectory() as d:
+            g = G.Gravacao(os.path.join(d, "x.mp4"), "mp4")
+            m = R.UltimosSegundos(fps=1000)
+            fim = time.time() + 2.0
+
+            def alimenta():
+                while time.time() < fim:
+                    for fr in quadros:
+                        g.t_ultimo, m.t_ultimo = -1, 0
+                        g.quadro(fr)
+                        m.quadro(fr)
+
+            t = threading.Thread(target=alimenta, daemon=True)
+            t.start()
+            while time.time() < fim:
+                for fr in quadros:
+                    cap._av = fr
+                    cap.imagem(150, 320)
+            t.join(5)
+            g.parar()
+            g.thread.join(30)
+            self.assertEqual(g.erro, "")
+            self.assertGreater(g.gravados, 1)
 
 
 if __name__ == "__main__":

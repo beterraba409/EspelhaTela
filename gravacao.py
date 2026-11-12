@@ -24,6 +24,16 @@ def par(n):
     return max(2, n - n % 2)
 
 
+def encaixa(img, largura, altura):
+    """PIL.Image no tamanho do video sem distorcer: o aparelho girou no meio da gravacao -> faixas pretas."""
+    from PIL import ImageOps
+    if img.size == (largura, altura):
+        return img
+    if abs(img.width / max(1, img.height) - largura / max(1, altura)) < 0.02:
+        return img.resize((largura, altura))
+    return ImageOps.pad(img.convert("RGB"), (largura, altura), color=(0, 0, 0))
+
+
 def nome_do_tempo(segundos):
     s = int(segundos)
     return "%02d:%02d" % (s // 60, s % 60)
@@ -47,6 +57,7 @@ class Gravacao:
         self.pulados = 0
         self.erro = ""
         self.motivo = ""
+        self._conv = None  # conversor proprio (o do quadro e compartilhado com a tela: duas threads nele derrubam o Python)
         self.thread = threading.Thread(target=self._roda, daemon=True)
         self.thread.start()
 
@@ -94,6 +105,15 @@ class Gravacao:
         if self.ao_fim:
             self.ao_fim(self.caminho, self.erro, self.motivo)
 
+    def _rgb(self, fr):
+        """PIL.Image do quadro com o conversor desta gravacao."""
+        if not hasattr(fr, "to_image"):
+            return fr
+        if self._conv is None:
+            from av.video.reformatter import VideoReformatter
+            self._conv = VideoReformatter()
+        return self._conv.reformat(fr, format="rgb24").to_image()
+
     def _itens(self):
         while True:
             item = self.q.get()
@@ -123,7 +143,14 @@ class Gravacao:
                         rep.pts, rep.time_base = extra, fractions.Fraction(1, 1000)
                         for pkt in stream.encode(rep):
                             saida.mux(pkt)
-                novo = fr.reformat(width=stream.width, height=stream.height, format="yuv420p")
+                if abs(fr.width / max(1, fr.height) - stream.width / max(1, stream.height)) > 0.02:
+                    fr = av.VideoFrame.from_image(encaixa(self._rgb(fr), stream.width, stream.height))  # girou: sem esticar
+                if self._conv is None:
+                    from av.video.reformatter import VideoReformatter
+                    self._conv = VideoReformatter()
+                novo = self._conv.reformat(fr, width=stream.width, height=stream.height, format="yuv420p")
+                if novo is fr:  # nada a converter: o reformat devolve o proprio quadro, que a tela tambem usa
+                    novo = av.VideoFrame.from_ndarray(fr.to_ndarray(), format="yuv420p")
                 novo.pts, novo.time_base = pts, fractions.Fraction(1, 1000)
                 ultimo_pts, anterior = pts, novo
                 for pkt in stream.encode(novo):
@@ -141,8 +168,10 @@ class Gravacao:
         from PIL import Image
         quadros, tempos = [], []
         for fr, t in self._itens():
-            img = fr.to_image() if hasattr(fr, "to_image") else fr
-            if img.width > LARGURA_GIF:
+            img = self._rgb(fr)
+            if quadros:  # todos no tamanho do primeiro (o GIF tem uma tela so); girou: faixas pretas
+                img = encaixa(img, quadros[0].width, quadros[0].height)
+            elif img.width > LARGURA_GIF:
                 img = img.resize((LARGURA_GIF, max(1, round(img.height * LARGURA_GIF / img.width))), Image.BILINEAR)
             quadros.append(img.convert("RGB").quantize(colors=256, method=Image.Quantize.FASTOCTREE))
             tempos.append(t)

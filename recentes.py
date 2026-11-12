@@ -27,6 +27,7 @@ class UltimosSegundos:
         self.q = queue.Queue(maxsize=3)
         self.ativo = True
         self.t_ultimo = 0.0
+        self._conv = None
         threading.Thread(target=self._roda, daemon=True).start()
 
     def quadro(self, fr):
@@ -46,7 +47,13 @@ class UltimosSegundos:
         while True:
             agora, fr = self.q.get()
             try:
-                img = fr.to_image() if hasattr(fr, "to_image") else fr
+                if hasattr(fr, "to_image"):  # conversor desta thread (o do quadro e compartilhado com a tela)
+                    if self._conv is None:
+                        from av.video.reformatter import VideoReformatter
+                        self._conv = VideoReformatter()
+                    img = self._conv.reformat(fr, format="rgb24").to_image()
+                else:
+                    img = fr
                 if img.height > self.altura_max:
                     img = img.resize((max(2, round(img.width * self.altura_max / img.height)), self.altura_max))
                 buf = io.BytesIO()
@@ -104,6 +111,9 @@ def salva_mp4(quadros, caminho, ate=None):
                     for pkt in st.encode(rep):
                         saida.mux(pkt)
             img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+            if img.size != (larg, alt):
+                from gravacao import encaixa
+                img = encaixa(img, larg, alt)  # o aparelho girou dentro dos 30 s: sem esticar
             fr = av.VideoFrame.from_image(img).reformat(width=larg, height=alt, format="yuv420p")
             fr.pts, fr.time_base, ultimo, anterior = pts, tb, pts, fr
             for pkt in st.encode(fr):

@@ -116,8 +116,9 @@ def cria(nome, perfil, api, ram=None, dados=None, tag="google_apis", abi="x86_64
     return avd
 
 
-def lista(pasta=None):
-    """[{nome, rotulo, perfil, api, pasta, tamanho, do_vision}] dos AVDs na pasta (do Vision primeiro)."""
+def lista(pasta=None, com_tamanho=True):
+    """[{nome, rotulo, perfil, api, pasta, tamanho, do_vision}] dos AVDs na pasta (do Vision primeiro).
+    com_tamanho=False nao percorre as pastas (para consultas frequentes)."""
     pasta = pasta or pasta_avd()
     saida = []
     if not os.path.isdir(pasta):
@@ -133,7 +134,7 @@ def lista(pasta=None):
         cfg = le_ini(os.path.join(avd, "config.ini"))
         m = re.search(r"android-(\d+)", cfg.get("image.sysdir.1", "") + " " + cfg.get("target", ini.get("target", "")))
         saida.append({"nome": nome, "rotulo": cfg.get("avd.ini.displayname", nome), "perfil": cfg.get("vision.perfil", ""),
-                      "api": int(m.group(1)) if m else None, "pasta": avd, "tamanho": tamanho_pasta(avd),
+                      "api": int(m.group(1)) if m else None, "pasta": avd, "tamanho": tamanho_pasta(avd) if com_tamanho else 0,
                       "do_vision": nome.startswith(PREFIXO), "config": cfg})
     saida.sort(key=lambda a: (not a["do_vision"], a["nome"].lower()))
     return saida

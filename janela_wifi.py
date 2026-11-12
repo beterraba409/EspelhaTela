@@ -165,7 +165,7 @@ class JanelaWifi:
             passos.pack(fill="x")
             for n, t in enumerate(("No aparelho: Opções do desenvolvedor › Depuração por Wi-Fi › ligar.",
                                    "Toque em “Parear o dispositivo com um código de pareamento”.",
-                                   "Digite abaixo o IP e porta e o código de 6 dígitos que aparecem."), 1):
+                                   "Digite abaixo o IP e a porta e o código de 6 dígitos que aparecem."), 1):
                 tk.Label(passos, text="%d.  %s" % (n, t), bg=visual.BG2, fg=visual.FG, font=(self.f["texto"], 9), anchor="w",
                          justify="left", wraplength=420).pack(anchor="w", pady=1)
             self._rotulo("IP e porta de pareamento", 12)
@@ -183,6 +183,8 @@ class JanelaWifi:
 
     # ---- acoes
     def _acao(self):
+        if getattr(self, "ocupado", False):
+            return  # Enter de novo durante o pareamento: nao dispara outro adb pair
         if self.modo == "ip":
             txt = self.var_ip.get().strip()
             if not endereco_valido(txt):
@@ -200,6 +202,7 @@ class JanelaWifi:
             return self._mostra("IP e porta de conexão inválidos, como 192.168.1.20:41235", visual.PERIGO)
         self.config["ultimo_pareamento"] = par.split(":")[0] + ":"
         self.bt_ok.define(desativado=True)
+        self.ocupado = True
 
         def trabalho():
             try:
@@ -222,6 +225,7 @@ class JanelaWifi:
                 else:
                     end, msg = dado
                     self.bt_ok.define(desativado=False)
+                    self.ocupado = False
                     if end:
                         self._mostra("✔  " + msg, visual.VERDE)
                         self.ao_parear(end)

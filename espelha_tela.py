@@ -60,8 +60,10 @@ except ImportError:
 
 try:
     import av  # decodificador H.264 (FFmpeg) do modo video
+    from av.video.reformatter import VideoReformatter
 except Exception:
     av = None
+    VideoReformatter = None
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import adb_servidor  # noqa: E402  (porta do servidor adb, aviso de wrapper)
@@ -82,7 +84,7 @@ import janela_config  # noqa: E402  (ligar e desligar as ferramentas da barra la
 import janela_emuladores  # noqa: E402  (Androids virtuais dentro do Vision)
 import emulador_avd  # noqa: E402
 
-VERSAO = "2.4"
+VERSAO = "2.5"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -211,6 +213,16 @@ def listar_aparelhos(adb):
 
 ESTADOS = {"device": "", "unauthorized": "n\u00e3o autorizado", "offline": "offline", "recovery": "em recovery",
            "sideload": "em sideload", "bootloader": "em bootloader", "authorizing": "autorizando"}
+
+
+def conta(n, um, varios):
+    """'1 item', '3 itens' (no lugar de 'item(ns)')."""
+    return "%d %s" % (n, um if n == 1 else varios)
+
+
+def para_arquivo(serial):
+    """Serial usavel em nome de arquivo (o de Wi-Fi tem ':', que no Windows vira fluxo alternativo do NTFS)."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", serial or "aparelho")
 
 
 ROTULOS_EMULADOR = {}  # serial -> "Emulador · SmartPOS (Android 11)" dos emuladores conhecidos
@@ -392,6 +404,8 @@ class Captura(threading.Thread):
         super().__init__(daemon=True)
         self.adb = adb
         self.gravacao = None  # gravacao de tela em andamento (recebe cada quadro mostrado)
+        self._conv = VideoReformatter() if av is not None else None  # conversor so da tela (ver imagem())
+        self._lock_conv = threading.Lock()
         self.recentes = None  # os ultimos segundos para o Reportar bug (recentes.UltimosSegundos)
         self.serial = serial
         self.intervalo_min = intervalo_min
@@ -432,7 +446,8 @@ class Captura(threading.Thread):
         if fr is None:
             return self._img
         if self._img_de is not fr:
-            self._img, self._img_de = fr.to_image(), fr
+            with self._lock_conv:
+                self._img, self._img_de = self._conv.reformat(fr, format="rgb24").to_image(), fr
         return self._img
 
     @frame.setter
@@ -457,7 +472,8 @@ class Captura(threading.Thread):
                 return img
             return img.resize((w, h), Image.BILINEAR)
         modo = "AREA" if w < fr.width * 0.8 else "FAST_BILINEAR"  # reduzir muito pede media de area (sem serrilhado)
-        return fr.reformat(width=w, height=h, format="rgb24", interpolation=modo).to_image()
+        with self._lock_conv:  # conversor proprio: o do quadro e compartilhado com a gravacao e os ultimos 30 s
+            return self._conv.reformat(fr, width=w, height=h, format="rgb24", interpolation=modo).to_image()
 
     def trocar(self, serial):
         self.serial = serial
@@ -974,6 +990,7 @@ class MonitorMemoria:
     def __init__(self, app):
         self.app = app
         self.cap = app.cap
+        self.serial = app.cap.serial  # o aparelho desta janela, mesmo que o principal troque de aparelho
         self.q = queue.Queue()
         self.hist = {}      # nome -> [(t, rss_kb)]
         self.base = {}      # nome -> primeiro rss visto (para o delta)
@@ -989,7 +1006,7 @@ class MonitorMemoria:
         self.ocupado = False
 
         w = self.win = tk.Toplevel(app.root)
-        w.title("Monitor de memória - %s" % (self.cap.serial or "aparelho"))
+        w.title("Monitor de memória - %s" % (self.serial or "aparelho"))
         aplica_icone(w)
         w.configure(bg=BG)
         w.geometry("820x700")
@@ -1016,20 +1033,20 @@ class MonitorMemoria:
         self.cb_int.set("3 s")
         self.cb_int.pack(side="left", padx=(8, 0))
         self.cb_int.bind("<<ComboboxSelected>>", lambda e: setattr(self, "intervalo", self.INTERVALOS[self.cb_int.get()]))
-        Dica(self.cb_int, "Intervalo de leitura", "Leituras rapidas (ps), baixo impacto no aparelho")
+        Dica(self.cb_int, "Intervalo de leitura", "Leituras r\u00e1pidas (ps), baixo impacto no aparelho")
         self.var_ativa = tk.BooleanVar(value=bool(app.config.get("memoria_ativa", True)))
         self.ck = ttk.Checkbutton(ctl, text="Medição ligada", variable=self.var_ativa, command=self.liga_desliga)
         self.ck.pack(side="left", padx=(8, 0))
-        Dica(self.ck, "Habilitar / desabilitar a medição", "Desligada: nenhuma leitura e feita no aparelho. A escolha fica lembrada")
+        Dica(self.ck, "Habilitar / desabilitar a medição", "Desligada: nenhuma leitura \u00e9 feita no aparelho. A escolha fica lembrada")
         self.bt_pss = ttk.Button(ctl, text="Medir PSS", command=self.mede_pss)
         self.bt_pss.pack(side="left", padx=(8, 0))
         Dica(self.bt_pss, "Medição precisa (PSS)", "dumpsys meminfo: mais exato que o RSS, mas leva uns 6 s e pesa no aparelho")
         self.bt_det = ttk.Button(ctl, text="Detalhar app", command=self.detalha)
         self.bt_det.pack(side="left", padx=(8, 0))
-        Dica(self.bt_det, "Detalhar app selecionado", "Java heap, nativo, gráficos, Views e Activities (util para achar vazamento)")
+        Dica(self.bt_det, "Detalhar app selecionado", "Java heap, nativo, gráficos, Views e Activities (\u00fatil para achar vazamento)")
         self.bt_kill = ttk.Button(ctl, text="Encerrar app", command=self.encerra)
         self.bt_kill.pack(side="left", padx=(8, 0))
-        Dica(self.bt_kill, "Encerrar app", "am force-stop no pacote selecionado (pede confirmacao)")
+        Dica(self.bt_kill, "Encerrar app", "am force-stop no pacote selecionado (pede confirma\u00e7\u00e3o)")
         bt_csv = ttk.Button(ctl, text="Exportar CSV", command=self.exporta)
         bt_csv.pack(side="right")
         Dica(bt_csv, "Exportar histórico", "Salva todas as leituras em Imagens\\Vision")
@@ -1072,12 +1089,12 @@ class MonitorMemoria:
 
     # ---- coleta (thread) -> fila -> UI
     def _adb(self, *args, timeout=15):
-        return rodar([self.cap.adb, "-s", self.cap.serial] + list(args), timeout=timeout)
+        return rodar([self.cap.adb, "-s", self.serial] + list(args), timeout=timeout)
 
     def _coleta(self):
         while not self.parar:
             t0 = time.time()
-            if not self.pausado and self.cap.serial:
+            if not self.pausado and self.serial:
                 try:
                     _, out, err = self._adb("shell", "cat /proc/meminfo | head -6; echo ---; ps -A -o PID,RSS,NAME 2>/dev/null || ps")
                     if "---" in out:
@@ -1213,7 +1230,7 @@ class MonitorMemoria:
         if not inicial:
             self.app.config["memoria_ativa"] = ativa
             salvar_config(self.app.config)
-        self.rodape.configure(text="medição ligada" if ativa else "medição desligada: nenhuma leitura e feita no aparelho", fg=FG2)
+        self.rodape.configure(text="medição ligada" if ativa else "medição desligada: nenhuma leitura \u00e9 feita no aparelho", fg=FG2)
 
     def _mostra_texto(self, texto):
         self.txt.configure(state="normal")
@@ -1260,7 +1277,7 @@ class MonitorMemoria:
         pacote = nome.split(":")[0]
         if "." not in pacote or not re.fullmatch(r"[A-Za-z0-9._]+", pacote):
             return messagebox.showwarning("Monitor de memória", "%s não parece um app (sem nome de pacote)." % nome, parent=self.win)
-        if not messagebox.askyesno("Encerrar app", "Encerrar %s no aparelho %s?\n\n(am force-stop)" % (pacote, self.cap.serial), parent=self.win):
+        if not messagebox.askyesno("Encerrar app", "Encerrar %s no aparelho %s?\n\n(am force-stop)" % (pacote, self.serial), parent=self.win):
             return
 
         def trabalho():
@@ -1277,7 +1294,7 @@ class MonitorMemoria:
             return messagebox.showinfo("Monitor de memória", "Ainda não há leituras.", parent=self.win)
         pasta = os.path.join(os.path.expanduser("~"), "Pictures", "Vision")
         os.makedirs(pasta, exist_ok=True)
-        caminho = os.path.join(pasta, "memória-%s-%s.csv" % (self.cap.serial or "aparelho", datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
+        caminho = os.path.join(pasta, "memória-%s-%s.csv" % (para_arquivo(self.serial), datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
         with open(caminho, "w", encoding="utf-8", newline="") as f:
             f.write("horario;processo;rss_kb\n")
             for nome, serie in self.hist.items():
@@ -1330,6 +1347,7 @@ class GerenciadorArquivos:
     def __init__(self, app):
         self.app = app
         self.cap = app.cap
+        self.serial = app.cap.serial  # o aparelho desta janela, mesmo que o principal troque de aparelho
         self.q = queue.Queue()
         self.caminho = "/sdcard"
         self.hist = []
@@ -1339,7 +1357,7 @@ class GerenciadorArquivos:
         self.ordem = ("nome", False)
 
         w = self.win = tk.Toplevel(app.root)
-        w.title("Arquivos - %s" % (self.cap.serial or "aparelho"))
+        w.title("Arquivos - %s" % (self.serial or "aparelho"))
         aplica_icone(w)
         w.configure(bg=BG)
         w.geometry("900x620")
@@ -1365,11 +1383,11 @@ class GerenciadorArquivos:
         acoes = tk.Frame(w, bg=BG)
         acoes.pack(fill="x", padx=10, pady=4)
         self._bt(acoes, "⬇  Baixar para o PC", "Baixar para o PC", "Faz o download dos itens marcados para uma pasta do PC (adb pull)", self.baixar)
-        self._bt(acoes, "⬆  Enviar para o aparelho", "Enviar para o aparelho", "Escolhe arquivos do PC e coloca nesta pasta. Tambem da para arrastar do Explorer para esta janela.", self.enviar)
-        self._bt(acoes, "Abrir no PC", "Abrir no PC", "Baixa para a pasta temporaria e abre com o programa padrão", self.abrir)
+        self._bt(acoes, "⬆  Enviar para o aparelho", "Enviar para o aparelho", "Escolhe arquivos do PC e coloca nesta pasta. Tamb\u00e9m d\u00e1 para arrastar do Explorer para esta janela.", self.enviar)
+        self._bt(acoes, "Abrir no PC", "Abrir no PC", "Baixa para a pasta tempor\u00e1ria e abre com o programa padrão", self.abrir)
         self._bt(acoes, "Nova pasta", "Nova pasta", "Cria uma pasta aqui", self.nova_pasta)
         self._bt(acoes, "Renomear", "Renomear", "Muda o nome do item marcado", self.renomear)
-        self._bt(acoes, "Excluir", "Excluir", "Apaga os itens marcados do aparelho (pede confirmacao)", self.exclui)
+        self._bt(acoes, "Excluir", "Excluir", "Apaga os itens marcados do aparelho (pede confirma\u00e7\u00e3o)", self.exclui)
         self.lb_esp = tk.Label(acoes, text="", bg=BG, fg=FG2, font=("Segoe UI", 9))
         self.lb_esp.pack(side="right")
 
@@ -1409,7 +1427,7 @@ class GerenciadorArquivos:
 
     # ---- adb
     def _adb(self, *args, timeout=30):
-        return rodar([self.cap.adb, "-s", self.cap.serial] + list(args), timeout=timeout)
+        return rodar([self.cap.adb, "-s", self.serial] + list(args), timeout=timeout)
 
     def _espaco(self):
         try:
@@ -1570,11 +1588,11 @@ class GerenciadorArquivos:
         self.faixa_bt.pack(side="right")
         self.faixa_fecha.pack_forget()
         para = "para o PC em %s" % destino if tipo != "enviar" else "para o aparelho em %s" % destino
-        self._mostra_faixa("%s %d item(ns) %s" % ("\u2193  Download:" if tipo != "enviar" else "\u2191  Envio:", len(copias), para), ACENTO)
+        self._mostra_faixa("%s %s %s" % ("\u2193  Download:" if tipo != "enviar" else "\u2191  Envio:", conta(len(copias), "item", "itens"), para), ACENTO)
         self.faixa_texto.configure(text="preparando...")
         self.faixa_barra.configure(value=0)
         self.rodape.configure(text="%s ..." % acao.lower(), fg=ACENTO)
-        self.transf = transferencia.Transferencia(self.cap.adb, self.cap.serial, copias,
+        self.transf = transferencia.Transferencia(self.cap.adb, self.serial, copias,
                                                   lambda ev, dados: self.q.put(("andamento" if ev == "andamento" else "transf_fim", dados)),
                                                   sem_janela=SEM_JANELA)
         self.transf.iniciar()
@@ -1602,7 +1620,7 @@ class GerenciadorArquivos:
             self.faixa_bt.pack_forget()
             self.rodape.configure(text="%s cancelado" % nome_op.lower(), fg=FG2)
         elif falhas:
-            self._mostra_faixa("\u26A0  %s com falha em %d de %d item(ns)" % (nome_op, len(falhas), len(copias)), PERIGO)
+            self._mostra_faixa("\u26A0  %s com falha em %d de %s" % (nome_op, len(falhas), conta(len(copias), "item", "itens")), PERIGO)
             self.faixa_texto.configure(text=falhas[0])
             self.faixa_bt.pack_forget()
             self.rodape.configure(text="falhou: %s" % falhas[0][:160], fg=PERIGO)
@@ -1611,11 +1629,11 @@ class GerenciadorArquivos:
             total = sum(max(0, c.total) for c in copias)
             tam = (" (%s)" % tamanho_legivel(total)) if total else ""
             if tipo == "enviar":
-                self._mostra_faixa("\u2714  Envio conclu\u00eddo: %d item(ns)%s em %s" % (len(copias), tam, destino), visual.VERDE)
+                self._mostra_faixa("\u2714  Envio conclu\u00eddo: %s%s em %s" % (conta(len(copias), "item", "itens"), tam, destino), visual.VERDE)
                 self.faixa_texto.configure(text="os arquivos j\u00e1 est\u00e3o no aparelho")
                 self.faixa_bt.pack_forget()
             else:
-                self._mostra_faixa("\u2714  Download conclu\u00eddo: %d item(ns)%s salvos no PC" % (len(copias), tam), visual.VERDE)
+                self._mostra_faixa("\u2714  Download conclu\u00eddo: %s%s no PC" % (conta(len(copias), "item", "itens"), tam), visual.VERDE)
                 self.faixa_texto.configure(text=destino)
                 self.faixa_pasta = os.path.join(destino, copias[0].nome) if copias else destino
                 self.faixa_bt.configure(text="Abrir pasta")
@@ -1705,7 +1723,8 @@ class GerenciadorArquivos:
         sel = [i for i in self.marcados() if i[1] == "file"]
         if not sel:
             return messagebox.showinfo("Arquivos", "Marque um arquivo para abrir.", parent=self.win)
-        pasta = tempfile.mkdtemp(prefix="vision-")
+        pasta = os.path.join(tempfile.gettempdir(), "vision-abrir")  # uma pasta so, reaproveitada (antes ficava uma por arquivo aberto)
+        os.makedirs(pasta, exist_ok=True)
         alvo = os.path.join(pasta, sel[0][0])
         self.transferir("abrir", [self._copia_pull(sel[0], pasta)], pasta, lambda: os.startfile(alvo) if os.name == "nt" and os.path.exists(alvo) else None)
 
@@ -1718,7 +1737,7 @@ class GerenciadorArquivos:
             return
         dest = self._remoto(nome.strip())
         if self._protegido(dest):
-            return messagebox.showwarning("Arquivos", "Alteracoes so sao permitidas em /sdcard, /storage e /data/local/tmp.", parent=self.win)
+            return messagebox.showwarning("Arquivos", "Altera\u00e7\u00f5es s\u00f3 s\u00e3o permitidas em /sdcard, /storage e /data/local/tmp.", parent=self.win)
         self.tarefa("criando pasta ...", [["shell", "mkdir -p " + q(dest)]], lambda: self.vai(self.caminho, False))
 
     def renomear(self):
@@ -1730,7 +1749,7 @@ class GerenciadorArquivos:
         if not novo_nome or "/" in novo_nome or novo_nome == sel[0][0]:
             return
         if self._protegido(antigo):
-            return messagebox.showwarning("Arquivos", "Alteracoes so sao permitidas em /sdcard, /storage e /data/local/tmp.", parent=self.win)
+            return messagebox.showwarning("Arquivos", "Altera\u00e7\u00f5es s\u00f3 s\u00e3o permitidas em /sdcard, /storage e /data/local/tmp.", parent=self.win)
         self.tarefa("renomeando ...", [["shell", "mv %s %s" % (q(antigo), q(self._remoto(novo_nome.strip())))]], lambda: self.vai(self.caminho, False))
 
     def exclui(self):
@@ -1739,11 +1758,11 @@ class GerenciadorArquivos:
             return
         alvos = [self._remoto(i[0]) for i in sel]
         if any(self._protegido(a) for a in alvos):
-            return messagebox.showwarning("Arquivos", "Exclusão so e permitida em /sdcard, /storage e /data/local/tmp.", parent=self.win)
+            return messagebox.showwarning("Arquivos", "Exclus\u00e3o s\u00f3 \u00e9 permitida em /sdcard, /storage e /data/local/tmp.", parent=self.win)
         lista = "\n".join(a for a in alvos[:8]) + ("\n... (+%d)" % (len(alvos) - 8) if len(alvos) > 8 else "")
-        if not messagebox.askyesno("Excluir", "Apagar do aparelho %s:\n\n%s\n\nEsta acao não pode ser desfeita." % (self.cap.serial, lista), icon="warning", parent=self.win):
+        if not messagebox.askyesno("Excluir", "Apagar do aparelho %s:\n\n%s\n\nEsta a\u00e7\u00e3o n\u00e3o pode ser desfeita." % (self.serial, lista), icon="warning", parent=self.win):
             return
-        self.tarefa("excluindo %d item(ns) ..." % len(alvos), [["shell", "rm -rf " + q(a)] for a in alvos], lambda: self.vai(self.caminho, False))
+        self.tarefa("excluindo %s ..." % conta(len(alvos), "item", "itens"), [["shell", "rm -rf " + q(a)] for a in alvos], lambda: self.vai(self.caminho, False))
 
     # ---- fila -> UI
     def _consome(self):
@@ -1762,7 +1781,7 @@ class GerenciadorArquivos:
                         self.rodape.configure(text="%s: %s" % (cam, msg), fg=PERIGO)
                     else:
                         pastas = sum(1 for i in itens if i[1] != "file")
-                        self.rodape.configure(text="%s  -  %d pasta(s), %d arquivo(s)" % (cam, pastas, len(itens) - pastas), fg=FG2)
+                        self.rodape.configure(text="%s  -  %s, %s" % (cam, conta(pastas, "pasta", "pastas"), conta(len(itens) - pastas, "arquivo", "arquivos")), fg=FG2)
                 elif m[0] == "espaco":
                     self.lb_esp.configure(text=m[1])
                 elif m[0] == "andamento":
@@ -1776,7 +1795,7 @@ class GerenciadorArquivos:
                         self.rodape.configure(text="falhou: %s" % falhas[0][:160], fg=PERIGO)
                         messagebox.showerror("Arquivos", "Houve falha:\n\n%s" % "\n".join(falhas[:6]), parent=self.win)
                     else:
-                        self.rodape.configure(text="concluido: %s" % texto.replace(" ...", ""), fg=FG2)
+                        self.rodape.configure(text="conclu\u00eddo: %s" % texto.replace(" ...", ""), fg=FG2)
                         if depois:
                             depois()
         except Exception as e:  # noqa: BLE001
@@ -1921,7 +1940,7 @@ PREPARO = [
     ("Duração de animadores", "global", "animator_duration_scale", "0"),
     ("Tela sempre ligada (carregando)", "global", "stay_on_while_plugged_in", "7"),
     ("Tempo para apagar a tela", "system", "screen_off_timeout", "1800000"),
-    ("Rotação automatica", "system", "accelerometer_rotation", "0"),
+    ("Rota\u00e7\u00e3o autom\u00e1tica", "system", "accelerometer_rotation", "0"),
     ("Orientação fixa em retrato", "system", "user_rotation", "0"),
 ]
 
@@ -1934,11 +1953,12 @@ def valor_igual(a, b):
 
 
 class PainelApp:
-    """Informações do aparelho e de um app escolhido, ações rapidas e preparo para automação."""
+    """Informações do aparelho e de um app escolhido, ações rápidas e preparo para automação."""
 
     def __init__(self, app):
         self.app = app
         self.cap = app.cap
+        self.serial = app.cap.serial  # o aparelho desta janela, mesmo que o principal troque de aparelho
         self.q = queue.Queue()
         self.parar = False
         favs = favoritos(app.config)
@@ -1948,7 +1968,7 @@ class PainelApp:
         self.instalados = []
 
         w = self.win = tk.Toplevel(app.root)
-        w.title("App e aparelho - %s" % (self.cap.serial or "aparelho"))
+        w.title("App e aparelho - %s" % (self.serial or "aparelho"))
         aplica_icone(w)
         w.configure(bg=BG)
         w.geometry("860x720")
@@ -1992,7 +2012,7 @@ class PainelApp:
             ("Abrir", "Abrir o app", "Inicia o app (monkey)", self.abrir),
             ("Forçar parada", "Forçar parada", "am force-stop", self.parar_app),
             ("Reiniciar", "Reiniciar o app", "Para e abre de novo", self.reiniciar),
-            ("Limpar dados", "Limpar dados", "pm clear: apaga login, configuracoes e arquivos do app (pede confirmacao)", self.limpar),
+            ("Limpar dados", "Limpar dados", "pm clear: apaga login, configura\u00e7\u00f5es e arquivos do app (pede confirma\u00e7\u00e3o)", self.limpar),
             ("Conceder permissões", "Conceder permissões", "Concede camera, localização, armazenamento etc. quando o app pede", self.conceder),
         ):
             b = ttk.Button(acoes, text=txt, command=cmd)
@@ -2042,7 +2062,7 @@ class PainelApp:
 
     # ---- coleta
     def _adb(self, *args, timeout=30):
-        return rodar([self.cap.adb, "-s", self.cap.serial] + list(args), timeout=timeout)
+        return rodar([self.cap.adb, "-s", self.serial] + list(args), timeout=timeout)
 
     def escolheu(self, _e=None):
         pk = self.cb.get().lstrip("* ").strip()
@@ -2178,6 +2198,8 @@ class PainelApp:
                     self.rodape.configure(text=m[1], fg=PERIGO)
                 elif m[0] == "msg":
                     self.rodape.configure(text=m[1], fg=FG2)
+                    if len(m) > 3 and m[3]:
+                        m[3]()  # so quando todos os comandos deram certo
                     if len(m) > 2 and m[2]:
                         self.atualiza()
         except Exception as e:  # noqa: BLE001
@@ -2185,7 +2207,7 @@ class PainelApp:
         self.win.after(150, self._consome)
 
     # ---- acoes
-    def _roda(self, texto, comandos, depois_atualiza=True):
+    def _roda(self, texto, comandos, depois_atualiza=True, se_der_certo=None):
         self.rodape.configure(text=texto + " ...", fg=ACENTO)
 
         def trabalho():
@@ -2198,7 +2220,8 @@ class PainelApp:
                         falhas.append(txt.strip().splitlines()[-1][:100] if txt.strip() else "falhou")
                 except Exception as e:  # noqa: BLE001
                     falhas.append(str(e)[:100])
-            self.q.put(("msg", ("%s: %s" % (texto, falhas[0])) if falhas else ("concluido: " + texto), depois_atualiza))
+            self.q.put(("msg", ("%s: %s" % (texto, falhas[0])) if falhas else ("concluído: " + texto), depois_atualiza,
+                        None if falhas else se_der_certo))
 
         threading.Thread(target=trabalho, daemon=True).start()
 
@@ -2220,7 +2243,7 @@ class PainelApp:
     def limpar(self):
         if not self.pacote:
             return messagebox.showinfo("App e aparelho", "Escolha um app na lista.", parent=self.win)
-        if not messagebox.askyesno("Limpar dados", "Apagar TODOS os dados de %s no aparelho %s?\n\nLogin, configuracoes e arquivos do app serao perdidos." % (self.pacote, self.cap.serial), icon="warning", parent=self.win):
+        if not messagebox.askyesno("Limpar dados", "Apagar TODOS os dados de %s no aparelho %s?\n\nLogin, configura\u00e7\u00f5es e arquivos do app ser\u00e3o perdidos." % (self.pacote, self.serial), icon="warning", parent=self.win):
             return
         self._roda("limpando dados de %s" % self.pacote, ["pm clear %s" % self.pacote])
 
@@ -2237,14 +2260,17 @@ class PainelApp:
             self.rodape.configure(text="copiado: %s" % txt, fg=FG2)
 
     def _arq_original(self):
-        return os.path.join(pasta_dados(), "preparo-%s.json" % (self.cap.serial or "aparelho"))
+        return os.path.join(pasta_dados(), "preparo-%s.json" % (self.serial or "aparelho"))
 
     def prepara(self):
+        if not self.estado:
+            return messagebox.showinfo("Preparar", "Ainda não li as configurações do aparelho. Aguarde a leitura terminar "
+                                       "(ou clique em Atualizar) e tente de novo.", parent=self.win)
         mudancas = [(rot, ns, ch, self.estado.get(ch, "null"), alvo) for rot, ns, ch, alvo in PREPARO if not valor_igual(self.estado.get(ch, "null"), alvo)]
         if not mudancas:
-            return messagebox.showinfo("Preparar", "O aparelho já esta preparado.", parent=self.win)
+            return messagebox.showinfo("Preparar", "O aparelho já está preparado.", parent=self.win)
         lista = "\n".join("- %s: %s -> %s" % (rot, atual, alvo) for rot, _ns, _ch, atual, alvo in mudancas)
-        if not messagebox.askyesno("Preparar para automação", "Alterar no aparelho %s:\n\n%s\n\nOs valores atuais ficam guardados para restaurar." % (self.cap.serial, lista), parent=self.win):
+        if not messagebox.askyesno("Preparar para automação", "Alterar no aparelho %s:\n\n%s\n\nOs valores atuais ficam guardados para restaurar." % (self.serial, lista), parent=self.win):
             return
         try:
             arq = self._arq_original()
@@ -2267,17 +2293,20 @@ class PainelApp:
             return messagebox.showinfo("Restaurar", "Não há valores anteriores guardados para este aparelho.", parent=self.win)
         with open(arq, encoding="utf-8") as f:
             antigos = json.load(f)
-        if not messagebox.askyesno("Restaurar", "Voltar %d configuração(oes) aos valores anteriores?" % len(antigos), parent=self.win):
+        if not messagebox.askyesno("Restaurar", "Voltar %d %s aos valores anteriores?" % (
+                len(antigos), "configuração" if len(antigos) == 1 else "configurações"), parent=self.win):
             return
         cmds = []
         for chave, val in antigos.items():
             ns, ch = chave.split(":", 1)
             cmds.append("settings delete %s %s" % (ns, ch) if val in ("null", "") else "settings put %s %s %s" % (ns, ch, val))
-        self._roda("restaurando configuracoes", cmds)
-        try:
-            os.remove(arq)
-        except OSError:
-            pass
+        def apaga_original():  # so depois de restaurar de verdade: se o aparelho cair no meio, os originais ficam
+            try:
+                os.remove(arq)
+            except OSError:
+                pass
+
+        self._roda("restaurando configurações", cmds, se_der_certo=apaga_original)
 
     def fechar(self):
         self.parar = True
@@ -2393,6 +2422,7 @@ class App:
         self.fila = queue.Queue()
         self.inj = Injetor(cap.adb)
         self.clip_visto = {}  # serial -> (marca, texto) da area de transferencia do aparelho
+        self.fila_ui = queue.Queue()  # funcoes que threads pedem para rodar na interface (na_interface)
         self.fila_apks = []  # apps soltos no espelho esperando a vez de instalar
         self.bugs_prontos = []  # (pasta, zip, texto, erros) vindos da thread do Reportar bug
         self.emu_prontos = []  # seriais de emuladores que terminaram de ligar (espelha o ultimo)
@@ -2696,7 +2726,7 @@ class App:
         elif outros and self.cap.serial:
             nomes = "\n".join(os.path.basename(c.rstrip("/\\")) for c in outros[:8])
             if messagebox.askyesno("Enviar para o aparelho", "Enviar para /sdcard/Download de %s?\n\n%s" % (self._nome_aparelho(self.cap.serial), nomes), parent=self.root):
-                self.tarefa("enviando %d item(ns) para /sdcard/Download..." % len(outros), ["push"] + outros + ["/sdcard/Download/"],
+                self.tarefa("enviando %s para /sdcard/Download..." % conta(len(outros), "item", "itens"), ["push"] + outros + ["/sdcard/Download/"],
                             lambda rc, saida: (self._fim_tarefa(), self.aviso_rapido("enviado para /sdcard/Download" if rc == 0 else "falhou: %s" % resumo_texto(saida, 80), 6)))
 
     def _apos_instalar(self, rc, saida, base, arqs, nome):
@@ -2832,7 +2862,7 @@ class App:
                                                   icone=aplica_icone, ao_fechar=lambda: setattr(self, "logvivo", None))
 
     def menu_logcat(self):
-        m = tk.Menu(self.root, tearoff=0, bg=BG2, fg=FG, activebackground=ACENTO, activeforeground="#ffffff", bd=0)
+        m = visual.menu(self.root)
         for n in JANELAS_LOG:
             m.add_command(label="Exportar os últimos %d minutos" % n, command=lambda n=n: self.exporta_logcat(n))
         try:
@@ -2866,10 +2896,10 @@ class App:
         self.aviso_rapido("logcat salvo: %s (%s linhas)" % (caminho, n), 8)
         texto = "Logcat dos últimos %d minutos salvo (%s linhas):\n\n%s" % (minutos, n, caminho)
         if aviso:
-            texto += "\n\nAtencao: " + aviso
+            texto += "\n\nAtenção: " + aviso
         if messagebox.askyesno("Exportar logcat", texto + "\n\nAbrir a pasta?"):
             try:
-                subprocess.Popen(["explorer", "/select," + caminho])
+                subprocess.Popen(["explorer", "/select,", os.path.normpath(caminho)])
             except Exception:  # noqa: BLE001
                 pass
 
@@ -2907,14 +2937,16 @@ class App:
             salvar_config(self.config)
             self.cap.ips = list(self.config["ips"])
         if nao_autorizado:
-            return messagebox.showinfo("Conectar por IP", "O aparelho %s pediu autorizacao.\n\nAceite 'Permitir depuração' na tela dele (marque 'Sempre permitir'). Ele entra na lista assim que você aceitar." % ip)
+            return messagebox.showinfo("Conectar por IP", "O aparelho %s pediu autoriza\u00e7\u00e3o.\n\nAceite 'Permitir depuração' na tela dele (marque 'Sempre permitir'). Ele entra na lista assim que você aceitar." % ip)
         if conectou:
             return self.aviso_rapido("conectado em %s" % ip)
-        messagebox.showerror("Conectar por IP", "Não consegui conectar em %s:\n\n%s\n\nConfira se o aparelho esta na mesma rede e com a depuração por rede (porta 5555) ligada." % (ip, saida[-300:] or "sem resposta"))
+        messagebox.showerror("Conectar por IP", "Não consegui conectar em %s:\n\n%s\n\nConfira se o aparelho est\u00e1 na mesma rede e com a depuração por rede (porta 5555) ligada." % (ip, saida[-300:] or "sem resposta"))
 
     def abre_painel(self):
         if not self.cap.serial:
             return messagebox.showwarning("Vision", "Nenhum aparelho selecionado.")
+        if self.painel is not None and self.painel.serial != self.cap.serial:  # aberta para outro aparelho: reabre neste
+            self.painel.fechar()
         if self.painel is not None:
             self.painel.win.deiconify()
             self.painel.win.lift()
@@ -2924,6 +2956,8 @@ class App:
     def abre_arquivos(self):
         if not self.cap.serial:
             return messagebox.showwarning("Vision", "Nenhum aparelho selecionado.")
+        if self.arq is not None and self.arq.serial != self.cap.serial:  # aberta para outro aparelho: reabre neste
+            self.arq.fechar()
         if self.arq is not None:
             self.arq.win.deiconify()
             self.arq.win.lift()
@@ -2933,6 +2967,8 @@ class App:
     def abre_memoria(self):
         if not self.cap.serial:
             return messagebox.showwarning("Vision", "Nenhum aparelho selecionado.")
+        if self.mem is not None and self.mem.serial != self.cap.serial:  # aberta para outro aparelho: reabre neste
+            self.mem.fechar()
         if self.mem is not None:
             self.mem.win.deiconify()
             self.mem.win.lift()
@@ -2964,12 +3000,12 @@ class App:
     def salva(self):
         pasta = os.path.join(os.path.expanduser("~"), "Pictures", "Vision")
         os.makedirs(pasta, exist_ok=True)
-        caminho = os.path.join(pasta, "captura-%s-%s.png" % (self.cap.serial or "aparelho", datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
+        caminho = os.path.join(pasta, "captura-%s-%s.png" % (para_arquivo(self.cap.serial), datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
         serial = self.cap.serial
         if self.cap.via == "video" and serial:
             # o video chega reduzido: a captura salva e feita em resolucao total
             reserva = self.cap.frame
-            self.aviso_rapido("capturando em resolucao total ...", 4)
+            self.aviso_rapido("capturando em resolu\u00e7\u00e3o total ...", 4)
 
             def trabalho():
                 try:
@@ -2982,7 +3018,7 @@ class App:
                 except Exception as e:  # noqa: BLE001
                     if reserva is not None:
                         reserva.save(caminho, "PNG")
-                        self.aviso_rapido("salvo (resolucao reduzida: %s) em %s" % (str(e)[:50], caminho))
+                        self.aviso_rapido("salvo (resolu\u00e7\u00e3o reduzida: %s) em %s" % (str(e)[:50], caminho))
                     else:
                         self.aviso_rapido("falha ao salvar: %s" % str(e)[:80])
 
@@ -3002,20 +3038,37 @@ class App:
     def aviso_rapido(self, texto, segundos=6):
         self.msg = (texto, time.time() + segundos)
 
-    def fechar(self):
+    def _confirma_fechar(self):
+        """Perguntas antes de fechar (copia em andamento, emuladores ligados). False = o usuario desistiu.
+        Fica separada para reabrir/atualizar perguntarem ANTES de abrir o Vision novo."""
+        if self.arq is not None and self.arq.transf and not messagebox.askyesno(
+                "Arquivos", "Ainda tem uma c\u00f3pia em andamento. Cancelar e fechar?", parent=self.root):
+            return False
         meus = self.gerente_emu.ligados_pelo_vision() if self.gerente_emu is not None else []
+        self._desligar_ao_fechar = []
         if meus:
             r = messagebox.askyesnocancel("Emuladores ligados", "Estes emuladores ligados pelo Vision continuam ligados:\n\n%s\n\n"
                                           "Desligar ao fechar? (N\u00e3o: eles ficam ligados e aparecem no pr\u00f3ximo Vision)" % "\n".join(meus),
                                           parent=self.root)
             if r is None:
-                return
+                return False
             if r:
-                ts = [threading.Thread(target=self.gerente_emu.desliga, args=(n,), daemon=True) for n in meus]
-                for t in ts:
-                    t.start()
-                for t in ts:
-                    t.join(20)
+                self._desligar_ao_fechar = meus
+        return True
+
+    def fechar(self, ja_confirmado=False):
+        if not ja_confirmado and not self._confirma_fechar():
+            return
+        if self.arq is not None and self.arq.transf:
+            self.arq.transf.cancelar()
+            self.arq.transf = None  # ja confirmado: a janela Arquivos nao pergunta de novo
+        meus = getattr(self, "_desligar_ao_fechar", [])
+        if meus:
+            ts = [threading.Thread(target=self.gerente_emu.desliga, args=(n,), daemon=True) for n in meus]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(20)
         if self.gerente_emu is not None:
             self.gerente_emu.parar = True
         if self.cap.gravacao is not None:  # salva o que ja foi gravado
@@ -3194,27 +3247,27 @@ class App:
             txt = ""
         txt = txt.replace("\r\n", "\n")
         if not txt:
-            return self.aviso_rapido("nada para colar: a area de transferencia do PC esta vazia")
+            return self.aviso_rapido("nada para colar: a \u00e1rea de transfer\u00eancia do PC est\u00e1 vazia")
         self.clip_do_pc = txt
         if self.inj_envia("v " + quote(txt, safe="")):
             return self.aviso_rapido("colado no aparelho: %s" % resumo_texto(txt), 3)
         simples = "".join(c for c in txt.replace("\n", " ") if re.fullmatch(r"[A-Za-z0-9 .,_@:/+=-]", c))
         if simples:
             self.enviar("text", simples.replace(" ", "%s"))
-        self.aviso_rapido("colado sem acentos e símbolos (clique via adb): %s" % resumo_texto(simples), 5)
+        self.aviso_rapido("colado sem acentos e s\u00edmbolos (digitado via adb): %s" % resumo_texto(simples), 5)
 
     def copiar_do_aparelho(self):
         """Ctrl+C: copia a seleção no aparelho (KEYCODE_COPY) e traz o texto para o PC."""
         serial = self.cap.serial
         if not self.inj.ok(serial):
-            return self.aviso_rapido("copiar do aparelho precisa do clique instantâneo (injetor), que não esta ativo", 5)
+            return self.aviso_rapido("copiar do aparelho precisa do clique instantâneo (injetor), que n\u00e3o est\u00e1 ativo", 5)
 
         def trabalho():
             self.inj_envia("k 278")  # KEYCODE_COPY: copia o texto selecionado no app
             time.sleep(0.3)
             r = self.inj.pergunta("g", serial, "CLIP")
             txt = unquote(r) if r else ""
-            self.root.after(0, lambda: self._copiado_do_aparelho(txt, r is None))
+            self.na_interface(lambda: self._copiado_do_aparelho(txt, r is None))
 
         threading.Thread(target=trabalho, daemon=True).start()
 
@@ -3240,7 +3293,7 @@ class App:
             self.clip_visto[serial] = (marca, txt)
             if anterior is None or not txt or txt == anterior[1] or txt == self.clip_do_pc:
                 continue  # ao conectar so anota o que ja estava la; e nao devolve o que veio do PC
-            self.root.after(0, lambda t=txt: self._copiado_do_aparelho(t, False))
+            self.na_interface(lambda t=txt: self._copiado_do_aparelho(t, False))
 
     # ---- emuladores
     def _gerente_emuladores(self):
@@ -3318,7 +3371,8 @@ class App:
             c.pronto.set()
 
         threading.Thread(target=trabalho, daemon=True).start()
-        janela_bug.JanelaBug(self.root, self.config, self._nome_aparelho(serial), c, lambda d: self._gera_bug(c, serial, d), icone=aplica_icone)
+        janela_bug.JanelaBug(self.root, self.config, self._nome_aparelho(serial), c, lambda d: self._gera_bug(c, serial, d), icone=aplica_icone,
+                             ao_cancelar=lambda: threading.Thread(target=lambda: (c.pronto.wait(60), shutil.rmtree(c.temp, ignore_errors=True)), daemon=True).start())
 
     def _gera_bug(self, c, serial, dados):
         salvar_config(self.config)
@@ -3404,9 +3458,15 @@ class App:
                 self.toques_antes = (serial, antes)
             except Exception:  # noqa: BLE001
                 self.toques_antes = None
-        threading.Thread(target=trabalho, daemon=True).start()
+        self.toques_antes = None
+        self._t_toques = threading.Thread(target=trabalho, daemon=True)
+        self._t_toques.start()
 
     def _devolve_toques(self, esperar=False):
+        t = getattr(self, "_t_toques", None)
+        if t is not None and t.is_alive():
+            t.join(12)  # parou logo depois de comecar: espera saber o valor de antes, para devolver certo
+        self._t_toques = None
         info, self.toques_antes = getattr(self, "toques_antes", None), None
         if not info or info[1] == "1":
             return
@@ -3438,8 +3498,8 @@ class App:
 
     def _copiado_do_aparelho(self, txt, falhou):
         if not txt:
-            return self.aviso_rapido("não foi possível ler a area de transferencia do aparelho" if falhou
-                                     else "a area de transferencia do aparelho esta vazia (selecione um texto antes)", 5)
+            return self.aviso_rapido("não foi possível ler a \u00e1rea de transfer\u00eancia do aparelho" if falhou
+                                     else "a \u00e1rea de transfer\u00eancia do aparelho est\u00e1 vazia (selecione um texto antes)", 5)
         try:
             if self.root.clipboard_get() == txt:
                 return  # ja esta no PC (Ctrl+C e a sincronia acharam o mesmo texto)
@@ -3454,7 +3514,7 @@ class App:
         modo, perfil = MODOS_CAPTURA[nome]
         if modo == "video" and av is None:
             self.cb_cap.set("Quadros (leve)")
-            return self.aviso_rapido("modo video indisponivel nesta versão (decodificador ausente)", 5)
+            return self.aviso_rapido("modo v\u00eddeo indispon\u00edvel nesta vers\u00e3o (decodificador ausente)", 5)
         self.cap.modo, self.cap.perfil = modo, perfil
         self.cap.video_ok, self.cap.falhas_video = av is not None, 0
         self.cap.nota = ""
@@ -3585,27 +3645,26 @@ class App:
 
         def trabalho():
             nos, erro = seletor.ler_tela(rodar, self.cap.adb, serial)
-            self.root.after(0, lambda: self._menu_textos(nos, erro, ponto, x_tela, y_tela))
+            self.na_interface(lambda: self._menu_textos(nos, erro, ponto, x_tela, y_tela))
 
         threading.Thread(target=trabalho, daemon=True).start()
 
     def _menu_textos(self, nos, erro, ponto, x, y):
         self.msg = ("", 0.0)  # tira o "lendo..."
-        m = tk.Menu(self.root, tearoff=0, bg=BG2, fg=FG, activebackground=ACENTO, activeforeground="#ffffff",
-                    disabledforeground=FG2, bd=0)
+        m = visual.menu(self.root)
         if not nos:
-            m.add_command(label="N\u00e3o consegui ler a tela: %s" % resumo_texto(erro or "sem resposta", 50), state="disabled")
+            visual.item_info(m, "N\u00e3o consegui ler a tela: %s" % resumo_texto(erro or "sem resposta", 50))
         else:
             textos = seletor.textos_no_ponto(nos, *ponto)
             if textos:
                 for t in textos:
                     m.add_command(label="Copiar \u201c%s\u201d" % resumo_texto(t, 48), command=lambda t=t: self.copiar(t))
             else:
-                m.add_command(label="Nenhum texto neste ponto", state="disabled")
-            m.add_separator()
+                visual.item_info(m, "Nenhum texto neste ponto")
             tudo = seletor.texto_da_tela(nos)
-            m.add_command(label="Copiar todo o texto da tela", state="normal" if tudo else "disabled",
-                          command=lambda: self.copiar(tudo))
+            if tudo:
+                m.add_separator()
+                m.add_command(label="Copiar todo o texto da tela", command=lambda: self.copiar(tudo))
         m.tk_popup(x, y)
 
     def copiar(self, texto):
@@ -3659,27 +3718,25 @@ class App:
         self.root.after(1, lambda: self.menu_aparelho(serial, int(x_tela), int(y_tela)))
 
     def menu_aparelho(self, serial, x, y):
-        m = tk.Menu(self.root, tearoff=0, bg=BG2, fg=FG, activebackground=ACENTO, activeforeground="#ffffff",
-                    disabledforeground=FG2, bd=0)
+        m = visual.menu(self.root)
         if not serial:
-            m.add_command(label="Nenhum aparelho escolhido", state="disabled")
+            visual.item_info(m, "Nenhum aparelho escolhido")
             return m.tk_popup(x, y)
         estado = next((a["estado"] for a in self.cap.aparelhos if a["serial"] == serial), "fora da lista")
         atual = serial == self.cap.serial
         pronto = estado == "device"
         info = next((a for a in self.cap.aparelhos if a["serial"] == serial), {"serial": serial, "estado": estado})
-        m.add_command(label=rotulo_aparelho(info), state="disabled")
+        visual.item_info(m, rotulo_aparelho(info) + ("  \u00b7  em uso nesta janela" if atual else ""))
         m.add_separator()
-        m.add_command(label="Em uso nesta janela" if atual else "Usar nesta janela",
-                      state="disabled" if atual or not pronto else "normal", command=lambda: self._usa_aparelho(serial))
-        m.add_command(label="Abrir em nova sess\u00e3o", state="disabled" if atual or not pronto else "normal",
-                      command=lambda: self.abrir_em_outra_janela(serial))
+        if pronto and not atual:
+            m.add_command(label="Usar nesta janela", command=lambda: self._usa_aparelho(serial))
+            m.add_command(label="Abrir em nova sess\u00e3o", command=lambda: self.abrir_em_outra_janela(serial))
         m.add_command(label="Copiar o serial", command=lambda: self.copiar(serial))
         m.add_separator()
         if ":" in serial:  # aparelho de rede: desconecta e esquece o IP
             m.add_command(label="Desconectar e esquecer", command=lambda: self.excluir_aparelho(serial))
         else:
-            m.add_command(label="Para remover, desconecte o cabo", state="disabled")
+            visual.item_info(m, "Para remover, desconecte o cabo")
         m.tk_popup(x, y)
 
     def _usa_aparelho(self, serial):
@@ -3729,7 +3786,7 @@ class App:
         if not os.path.isfile(caminho):
             self.cap.diag.evento("registro aberto pelo botao (ainda sem video nesta sessao)")
         try:
-            subprocess.Popen(["explorer", "/select," + caminho], env=ambiente_limpo())
+            subprocess.Popen(["explorer", "/select,", os.path.normpath(caminho)], env=ambiente_limpo())
         except Exception as e:  # noqa: BLE001
             self.aviso_rapido("não consegui abrir a pasta: %s" % str(e)[:80], 6)
 
@@ -3801,11 +3858,13 @@ class App:
                 args.append(a)
         if self.cap.serial:
             args += ["--serial", self.cap.serial]
+        if not self._confirma_fechar():  # antes de abrir o novo: cancelar aqui nao deixa dois Vision abertos
+            return
         try:
             subprocess.Popen(self._comando_vision() + args, close_fds=True, env=ambiente_limpo())
         except Exception as e:  # noqa: BLE001
             return messagebox.showerror("Vision", "N\u00e3o foi poss\u00edvel reabrir: %s\nFeche e abra o Vision para aplicar." % e, parent=self.root)
-        self.fechar()
+        self.fechar(ja_confirmado=True)
 
     # ---- atualizacoes (Releases do GitHub)
     def _token_github(self, pedir):
@@ -3842,9 +3901,9 @@ class App:
         def trabalho():
             try:
                 info, erro = atualizacao.ultima_versao(ATUALIZACAO["repo"], ATUALIZACAO["tag"], ATUALIZACAO["arquivo"], token), ""
-            except RuntimeError as e:
+            except Exception as e:  # noqa: BLE001  (sem internet, proxy que responde HTML, JSON inesperado...)
                 info, erro = None, str(e)
-            self.root.after(0, lambda: self._atualizacao_resposta(info, erro, manual, token))
+            self.na_interface(lambda: self._atualizacao_resposta(info, erro, manual, token))
 
         threading.Thread(target=trabalho, daemon=True).start()
 
@@ -3890,7 +3949,7 @@ class App:
                 erro = ""
             except Exception as e:  # noqa: BLE001
                 erro = str(e)[:160]
-            self.root.after(0, lambda: self._instala_atualizacao(destino, erro))
+            self.na_interface(lambda: self._instala_atualizacao(destino, erro))
 
         threading.Thread(target=trabalho, daemon=True).start()
 
@@ -3898,12 +3957,14 @@ class App:
         self.ocupado = ""
         if erro:
             return messagebox.showerror("Vision", "O download da atualiza\u00e7\u00e3o falhou: %s" % erro, parent=self.root)
+        if not self._confirma_fechar():
+            return self.aviso_rapido("atualiza\u00e7\u00e3o adiada: o instalador baixado fica em %s" % destino, 10)
         try:
             subprocess.Popen(comando_de_instalacao(destino, sys.executable, [os.getpid(), os.getppid()]), close_fds=True,
                              env=ambiente_limpo(), creationflags=SEM_JANELA | 0x00000200)  # sem janela, grupo proprio
         except Exception as e:  # noqa: BLE001
             return messagebox.showerror("Vision", "N\u00e3o foi poss\u00edvel abrir o instalador: %s" % e, parent=self.root)
-        self.fechar()
+        self.fechar(ja_confirmado=True)
 
     # ---- laco de desenho (so a thread da UI mexe no Tk)
     def tick(self):
@@ -3953,6 +4014,32 @@ class App:
             self._sel_desenha()
 
     def rodape_tick(self):
+        """A cada 400 ms: lista de aparelhos, rodape e o que as threads deixaram para a interface.
+        Nunca para: um erro aqui so e registrado (antes, uma excecao congelava a lista e os avisos)."""
+        try:
+            self._rodape_tick()
+        except Exception as e:  # noqa: BLE001
+            try:
+                self.cap.diag.evento("erro no rodape: %s" % str(e)[:160])
+            except Exception:  # noqa: BLE001
+                pass
+        finally:
+            try:
+                self.root.after(400, self.rodape_tick)
+            except tk.TclError:
+                pass  # janela fechada
+
+    def na_interface(self, funcao):
+        """Para threads: roda `funcao` na thread do Tk (chamar o Tk de outra thread e proibido)."""
+        self.fila_ui.put(funcao)
+
+    def _rodape_tick(self):
+        while not self.fila_ui.empty():
+            funcao = self.fila_ui.get_nowait()
+            try:
+                funcao()
+            except Exception as e:  # noqa: BLE001
+                self.aviso_rapido("erro: %s" % str(e)[:120], 6)
         cap = self.cap
         lista = [rotulo_aparelho(a) for a in cap.aparelhos]
         if list(self.combo["values"]) != lista:
@@ -3976,7 +4063,6 @@ class App:
             self.fps_hist = [(a, b) for a, b in self.fps_hist + [(agora, cap.seq)] if a > agora - 3.0]
             fps = (self.fps_hist[-1][1] - self.fps_hist[0][1]) / max(0.001, self.fps_hist[-1][0] - self.fps_hist[0][0]) if len(self.fps_hist) > 1 else 0.0
             clique = "Toque instant\u00e2neo" if self.inj.ok(cap.serial) else ("Toque lento (via adb)" if self.inj.erro else "Preparando o toque\u2026")
-            dim = "%d\u00d7%d" % cap.tamanho if cap.tamanho is not None else "\u2014"
             idade = time.time() - cap.t_frame if cap.t_frame else None
             if self.pausado:
                 estado = "Pausado"
@@ -4009,7 +4095,6 @@ class App:
             self._bug_pronto(*self.bugs_prontos.pop(0))
         while self.gravacoes_prontas:
             self._gravacao_pronta(*self.gravacoes_prontas.pop(0))
-        self.root.after(400, self.rodape_tick)
 
 
 def comando_de_instalacao(instalador, exe_app, pids, espera=20):
@@ -4139,7 +4224,7 @@ def main():
     root = tk.Tk()
     root.withdraw()
     if Image is None:
-        messagebox.showerror("Vision", "Pillow não esta instalado.\nInstale com: pip install pillow")
+        messagebox.showerror("Vision", "Pillow n\u00e3o est\u00e1 instalado.\nInstale com: pip install pillow")
         return 2
     adb = adb_inf or achar_adb(a.adb or None)
     if not adb:

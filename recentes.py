@@ -51,7 +51,10 @@ class UltimosSegundos:
                     if self._conv is None:
                         from av.video.reformatter import VideoReformatter
                         self._conv = VideoReformatter()
-                    img = self._conv.reformat(fr, format="rgb24").to_image()
+                    w, h = fr.width, fr.height
+                    if h > self.altura_max:  # reduz e converte numa passada so (antes: RGB cheio e depois reduzir)
+                        w, h = max(2, round(w * self.altura_max / h)), self.altura_max
+                    img = self._conv.reformat(fr, width=w, height=h, format="rgb24", interpolation="AREA").to_image()
                 else:
                     img = fr
                 if img.height > self.altura_max:

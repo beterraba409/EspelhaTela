@@ -136,11 +136,24 @@ public final class Injector {
                 }
                 break;
             case "g":
-                String lido = clipLe();
-                responde(lido == null ? "CLIP" : "CLIP " + URLEncoder.encode(lido, "UTF-8").replace("+", "%20"));
-                break;
             case "w":
-                responde("CLIPW " + clipMarca());
+                // area de transferencia numa thread propria: uma chamada lenta ao servico de clipboard
+                // (o PC pergunta a cada segundo) nunca deixa um toque esperando na fila
+                final String qual = c;
+                CLIPS.execute(new Runnable() {
+                    public void run() {
+                        try {
+                            if (qual.equals("w")) {
+                                responde("CLIPW " + clipMarca());
+                            } else {
+                                String lido = clipLe();
+                                responde(lido == null ? "CLIP" : "CLIP " + URLEncoder.encode(lido, "UTF-8").replace("+", "%20"));
+                            }
+                        } catch (Throwable t) {
+                            responde("ERR clip " + t);
+                        }
+                    }
+                });
                 break;
             case "q":
                 return false;
@@ -151,7 +164,16 @@ public final class Injector {
         return true;
     }
 
-    private static void responde(String s) {
+    private static final java.util.concurrent.ExecutorService CLIPS = java.util.concurrent.Executors.newSingleThreadExecutor(
+            new java.util.concurrent.ThreadFactory() {
+                public Thread newThread(Runnable r) {
+                    Thread t = new Thread(r, "clip");
+                    t.setDaemon(true);  // "q" encerra o injetor sem esperar a thread do clipboard
+                    return t;
+                }
+            });
+
+    private static synchronized void responde(String s) {
         System.out.println(s);
         System.out.flush();
     }

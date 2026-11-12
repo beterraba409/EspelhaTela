@@ -1045,5 +1045,57 @@ class QuadroCompartilhado(unittest.TestCase):
             self.assertGreater(g.gravados, 1)
 
 
+class CapturaOndeQuiser(unittest.TestCase):
+    """Vision 2.6: captura de tela na pasta escolhida, em PNG ou JPG."""
+
+    def _app(self, cfg, via="quadros"):
+        import types
+        from PIL import Image
+        import espelha_tela as E
+        app = E.App.__new__(E.App)
+        app.config, app.avisos = cfg, []
+        app.aviso_rapido = lambda t, s=6: app.avisos.append(t)
+        app.cap = types.SimpleNamespace(serial="192.168.0.5:5555", via=via, frame=Image.new("RGB", (30, 60), (200, 10, 10)))
+        return app
+
+    def test_pasta_escolhida_e_volta_ao_padrao(self):
+        import espelha_tela as E
+        with tempfile.TemporaryDirectory() as d:
+            app = self._app({"pasta_captura": d})
+            self.assertEqual(app.pasta_capturas(), d)
+            app.config["pasta_captura"] = os.path.join(d, "apagada")
+            self.assertEqual(app.pasta_capturas(), E.PASTA_CAPTURAS_PADRAO)  # pasta que sumiu: volta para Imagens\Vision
+
+    def test_salva_na_pasta_escolhida_em_png_e_jpg(self):
+        from PIL import Image
+        import espelha_tela as E
+        with tempfile.TemporaryDirectory() as d:
+            app = self._app({"pasta_captura": d})
+            app.salva()
+            pngs = [a for a in os.listdir(d) if a.endswith(".png")]
+            self.assertEqual(len(pngs), 1)
+            self.assertIn("192.168.0.5_5555", pngs[0])
+            jpg = os.path.join(d, "tela.jpg")
+            app.salva(jpg)
+            self.assertEqual(Image.open(jpg).format, "JPEG")
+            app.salva(os.path.join(d, "nao-existe", "x.png"))  # pasta sem acesso: avisa, nao quebra
+            self.assertTrue(app.avisos[-1].startswith("falha ao salvar"))
+        self.assertLessEqual(len(E.resumo_caminho("C:\\" + "\\".join(["pasta%d" % i for i in range(20)]))), 48)
+
+    def test_ultimos_segundos_reduz_o_video_numa_passada(self):
+        import time
+        import av
+        import numpy as np
+        import recentes as R
+        m = R.UltimosSegundos(segundos=5, fps=100)
+        fr = av.VideoFrame.from_ndarray(np.zeros((1280, 720, 3), np.uint8), format="rgb24").reformat(format="yuv420p")
+        m.quadro(fr)
+        time.sleep(0.5)
+        from PIL import Image
+        q = m.congela()
+        self.assertTrue(q)
+        self.assertEqual(Image.open(__import__("io").BytesIO(q[0][1])).size, (270, R.ALTURA_MAX))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

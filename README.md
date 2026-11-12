@@ -71,9 +71,9 @@ python espelha_tela.py
 | 📋 | **Copiar e colar** | **Ctrl+V** cola no aparelho o texto copiado no PC, com acentos. **Ctrl+C** copia a seleção do aparelho para o PC. O que um app copiar no aparelho (como o botão de copiar o serial) chega sozinho ao PC. **Botão direito** na tela copia o texto sob o mouse (até o que não dá para selecionar, como um serial) ou todo o texto da tela. |
 | 📱 | **Emuladores** | Cria e liga Androids virtuais (perfil SmartPOS, celular ou tablet) que aparecem no espelho; baixa o que faltar do Google, com estados salvos e vários ao mesmo tempo. |
 | ⚙️ | **Configurações** | Liga e desliga cada ferramenta da barra lateral: cada usuário deixa à mostra só o que usa. |
-| 📷 | **Captura e tela cheia** | PNG em `Imagens\Vision` (Ctrl+S) e tela cheia (F11). |
+| 📷 | **Captura e tela cheia** | PNG na pasta que você escolher (padrão `Imagens\Vision`, Ctrl+S); `Ctrl+Shift+S` ou o botão direito no ícone salva como PNG/JPG onde quiser. Tela cheia (F11). |
 
-**Atalhos:** `Ctrl+V` cola no aparelho · `Ctrl+C` copia do aparelho · `F6` liga o seletor · `F8` reportar bug · `F9` mostra/oculta a barra lateral · `F11` tela cheia · `Ctrl+S` salva a captura · `Esc` sai do seletor.
+**Atalhos:** `Ctrl+V` cola no aparelho · `Ctrl+C` copia do aparelho · `F6` liga o seletor · `F8` reportar bug · `F9` mostra/oculta a barra lateral · `F11` tela cheia · `Ctrl+S` salva a captura · `Ctrl+Shift+S` salva a captura como · `Esc` sai do seletor.
 
 ## 🎯 Seletor para o Maestro: exemplo
 

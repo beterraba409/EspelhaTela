@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.6 - captura onde quiser e folga para PC fraco
+
+- **Captura de tela onde quiser**: botão direito no ícone da captura (ou `Ctrl+Shift+S`) para **Salvar como** em PNG ou JPG, **Mudar a pasta das capturas**, abrir a pasta ou voltar para `Imagens\Vision`. O `Ctrl+S` passa a salvar na pasta escolhida.
+- **Toque nunca espera a área de transferência**: o injetor responde às consultas da área de transferência (feitas a cada segundo) numa linha própria no aparelho; antes, uma consulta lenta deixava o toque seguinte na fila.
+- **Menos processador**: a memória dos últimos 30 s do Reportar bug converte o quadro já no tamanho pequeno (uma passada só), e a liberação do último quadro não fica mais esperando o próximo dado do aparelho para anotar o registro.
+
 ## 2.5 - revisão geral e correções
 
 - **Fechamento inesperado do Vision**: a tela, a gravação e a memória dos últimos 30 s (ligada por padrão desde a 2.2) convertiam o mesmo quadro de vídeo ao mesmo tempo, e isso podia derrubar o programa sem aviso. Cada uma agora tem o seu próprio conversor.

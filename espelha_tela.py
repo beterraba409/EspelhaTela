@@ -28,6 +28,7 @@ a captura, F11 tela cheia, F9 barra lateral.
 
 import argparse
 import datetime
+import io
 import json
 import os
 import posixpath
@@ -84,7 +85,7 @@ import janela_config  # noqa: E402  (ligar e desligar as ferramentas da barra la
 import janela_emuladores  # noqa: E402  (Androids virtuais dentro do Vision)
 import emulador_avd  # noqa: E402
 
-VERSAO = "2.5"
+VERSAO = "2.6"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -575,7 +576,7 @@ class Captura(threading.Thread):
             except Exception:
                 pass
 
-        def entrega(pacotes, proc=proc):
+        def entrega(pacotes, proc=proc, medir_fila=True):
             for pkt in pacotes:
                 t0 = time.perf_counter()
                 for fr in codec_ref[0].decode(pkt):
@@ -596,7 +597,9 @@ class Captura(threading.Thread):
                     self.t_frame = time.time()
                     self.erro = ""
                     self.seq += 1
-                    self.diag.quadro((time.perf_counter() - t0) * 1000, diagnostico_video.bytes_na_fila(proc))
+                    # na liberacao o leitor esta parado lendo o pipe: medir a fila ali esperaria o proximo dado
+                    # com a trava na mao (no Windows a leitura e a consulta do mesmo pipe vao uma de cada vez)
+                    self.diag.quadro((time.perf_counter() - t0) * 1000, diagnostico_video.bytes_na_fila(proc) if medir_fila else 0)
 
         codec_ref, trava = [None], threading.Lock()
         estado = {"t_dado": 0.0, "retido": False, "liberou": False}
@@ -613,7 +616,7 @@ class Captura(threading.Thread):
                         continue
                     estado["retido"], estado["liberou"] = False, True
                     try:
-                        entrega(list(codec_ref[0].parse(None)))
+                        entrega(list(codec_ref[0].parse(None)), medir_fila=False)
                     except Exception as e:  # noqa: BLE001
                         f["erro"] = str(e)[:120]
                 if proc.poll() is not None:
@@ -2391,6 +2394,19 @@ def grupos_de_apks(caminhos):
     return grupos
 
 
+PASTA_CAPTURAS_PADRAO = os.path.join(os.path.expanduser("~"), "Pictures", "Vision")
+
+
+def resumo_caminho(caminho, limite=48):
+    """Caminho cortado no meio para caber num menu (unidade + ... + as duas ultimas pastas)."""
+    c = os.path.normpath(caminho)
+    if len(c) <= limite:
+        return c
+    partes = c.split(os.sep)
+    fim = os.sep.join(partes[-2:])
+    return partes[0] + os.sep + "..." + os.sep + fim if len(fim) < limite - 8 else "..." + c[-(limite - 3):]
+
+
 def resumo_texto(txt, limite=40):
     """Texto de uma linha, cortado, para os avisos de copiar e colar."""
     t = " ".join(txt.split())
@@ -2472,7 +2488,8 @@ class App:
         self.bt_pausa, b_cap, b_cheia = visual.linha_de_icones(col, [
             ("pausar", self.alterna_pausa), ("captura", self.salva), ("tela_cheia", self.tela_cheia)], larg)
         self._dica(self.bt_pausa, "Pausar ou retomar|Congela a imagem do aparelho")
-        self._dica(b_cap, "Salvar captura|Grava a tela em PNG na pasta Imagens\\Vision (Ctrl+S)")
+        self._dica(b_cap, "Salvar captura|Grava a tela em PNG (Ctrl+S). Botão direito: salvar como e escolher a pasta")
+        b_cap.bind("<Button-3>", self.menu_captura, add="+")
         self._dica(b_cheia, "Tela cheia|Liga e desliga a tela cheia (F11)")
         visual.titulo_secao(col, "Aparelho")
         for b, d in zip(visual.linha_de_icones(col, [
@@ -2562,6 +2579,7 @@ class App:
 
         root.bind("<Key>", self.tecla_digitada)
         root.bind("<Control-s>", lambda e: self.salva())
+        root.bind("<Control-S>", lambda e: self.salva_como())  # com Shift
         root.bind("<F11>", lambda e: self.tela_cheia())
         root.bind("<F9>", lambda e: self.alterna_lateral())
         root.bind("<F6>", lambda e: self.alterna_seletor() if self.ativa("seletor") else None)
@@ -2997,10 +3015,74 @@ class App:
         self.foto = None
         self.tela.itemconfig(self.img_id, image="")  # nao deixa a imagem do aparelho anterior na tela
 
-    def salva(self):
-        pasta = os.path.join(os.path.expanduser("~"), "Pictures", "Vision")
+    def pasta_capturas(self):
+        """Pasta escolhida em "Mudar a pasta das capturas" (ou Imagens\\Vision)."""
+        p = self.config.get("pasta_captura") or ""
+        return p if os.path.isdir(p) else PASTA_CAPTURAS_PADRAO
+
+    def _nome_captura(self, ext=".png"):
+        return "captura-%s-%s%s" % (para_arquivo(self.cap.serial), datetime.datetime.now().strftime("%Y%m%d-%H%M%S"), ext)
+
+    def salva_como(self):
+        """Ctrl+Shift+S: escolhe a pasta e o nome (PNG ou JPG); a pasta fica guardada para as próximas."""
+        pasta = self.pasta_capturas()
         os.makedirs(pasta, exist_ok=True)
-        caminho = os.path.join(pasta, "captura-%s-%s.png" % (para_arquivo(self.cap.serial), datetime.datetime.now().strftime("%Y%m%d-%H%M%S")))
+        caminho = filedialog.asksaveasfilename(
+            title="Salvar captura da tela", initialdir=pasta, initialfile=self._nome_captura(), defaultextension=".png",
+            filetypes=[("Imagem PNG", "*.png"), ("Imagem JPG", "*.jpg *.jpeg")], parent=self.root)
+        if not caminho:
+            return
+        self.config["pasta_captura"] = os.path.dirname(os.path.abspath(caminho))
+        salvar_config(self.config)
+        self.salva(caminho)
+
+    def muda_pasta_capturas(self):
+        p = filedialog.askdirectory(title="Onde salvar as capturas de tela?", initialdir=self.pasta_capturas(), parent=self.root)
+        if not p:
+            return
+        self.config["pasta_captura"] = os.path.abspath(p)
+        salvar_config(self.config)
+        self.aviso_rapido("as capturas (Ctrl+S) vão para " + os.path.abspath(p), 6)
+
+    def abre_pasta_capturas(self):
+        pasta = self.pasta_capturas()
+        os.makedirs(pasta, exist_ok=True)
+        if os.name == "nt":
+            subprocess.Popen(["explorer", os.path.normpath(pasta)])
+
+    def menu_captura(self, e):
+        m = visual.menu(self.root)
+        m.add_command(label="Salvar captura    Ctrl+S", command=self.salva)
+        m.add_command(label="Salvar como...    Ctrl+Shift+S", command=self.salva_como)
+        m.add_separator()
+        visual.item_info(m, "Pasta: " + resumo_caminho(self.pasta_capturas()))
+        m.add_command(label="Mudar a pasta das capturas...", command=self.muda_pasta_capturas)
+        m.add_command(label="Abrir a pasta das capturas", command=self.abre_pasta_capturas)
+        if self.config.get("pasta_captura"):
+            m.add_command(label="Voltar para Imagens\\Vision", command=self._pasta_capturas_padrao)
+        m.tk_popup(e.x_root, e.y_root)
+
+    def _pasta_capturas_padrao(self):
+        self.config.pop("pasta_captura", None)
+        salvar_config(self.config)
+        self.aviso_rapido("as capturas voltam para " + PASTA_CAPTURAS_PADRAO, 5)
+
+    def salva(self, caminho=None):
+        if caminho is None:
+            pasta = self.pasta_capturas()
+            os.makedirs(pasta, exist_ok=True)
+            caminho = os.path.join(pasta, self._nome_captura())
+        jpg = caminho.lower().endswith((".jpg", ".jpeg"))
+
+        def grava_png(dados):
+            if jpg:
+                Image.open(io.BytesIO(dados)).convert("RGB").save(caminho, "JPEG", quality=92)
+            else:
+                with open(caminho, "wb") as f:
+                    f.write(dados)
+
+        def grava_img(img):
+            img.convert("RGB").save(caminho, "JPEG", quality=92) if jpg else img.save(caminho, "PNG")
         serial = self.cap.serial
         if self.cap.via == "video" and serial:
             # o video chega reduzido: a captura salva e feita em resolucao total
@@ -3012,12 +3094,14 @@ class App:
                     rc, out, err = rodar([self.cap.adb, "-s", serial, "exec-out", "screencap -p"], timeout=20, binario=True)
                     if rc != 0 or out[:4] != b"\x89PNG":
                         raise RuntimeError(err.strip() or "captura vazia")
-                    with open(caminho, "wb") as f:
-                        f.write(out)
+                    grava_png(out)
                     self.aviso_rapido("salvo em " + caminho)
                 except Exception as e:  # noqa: BLE001
                     if reserva is not None:
-                        reserva.save(caminho, "PNG")
+                        try:
+                            grava_img(reserva)
+                        except Exception as e2:  # noqa: BLE001  (pasta sem permissao, disco cheio)
+                            return self.aviso_rapido("falha ao salvar: %s" % str(e2)[:80])
                         self.aviso_rapido("salvo (resolu\u00e7\u00e3o reduzida: %s) em %s" % (str(e)[:50], caminho))
                     else:
                         self.aviso_rapido("falha ao salvar: %s" % str(e)[:80])
@@ -3027,7 +3111,10 @@ class App:
         img = self.cap.frame
         if img is None:
             return self.aviso_rapido("nada para salvar ainda")
-        img.save(caminho, "PNG")
+        try:
+            grava_img(img)
+        except Exception as e:  # noqa: BLE001
+            return self.aviso_rapido("falha ao salvar: %s" % str(e)[:80])
         self.aviso_rapido("salvo em " + caminho)
 
     def mostra_aviso(self, texto):

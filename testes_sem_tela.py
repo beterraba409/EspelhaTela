@@ -1045,6 +1045,51 @@ class QuadroCompartilhado(unittest.TestCase):
             self.assertGreater(g.gravados, 1)
 
 
+class ListaDeAparelhos(unittest.TestCase):
+    """Vision 2.9: ao abrir ja mostra um aparelho; botao Atualizar le a lista na hora."""
+
+    A = [{"serial": "0123abcd", "estado": "device", "modelo": "GPOS780"},
+         {"serial": "192.168.1.6:5555", "estado": "device", "modelo": "moto g 7 play"},
+         {"serial": "XYZ", "estado": "unauthorized", "modelo": ""}]
+
+    def test_abre_no_ultimo_usado_ou_no_primeiro_pronto(self):
+        import espelha_tela as E
+        self.assertEqual(E.escolhe_aparelho(self.A, "192.168.1.6:5555"), "192.168.1.6:5555")
+        self.assertEqual(E.escolhe_aparelho(self.A, "sumiu"), "0123abcd")
+        self.assertEqual(E.escolhe_aparelho(self.A, "XYZ"), "0123abcd")  # nao autorizado nao serve
+        self.assertEqual(E.escolhe_aparelho(self.A[2:], ""), "")
+        self.assertEqual(E.escolhe_aparelho([], "x"), "")
+
+    def test_novos(self):
+        import espelha_tela as E
+        self.assertEqual(E.novos_aparelhos(self.A[:1], self.A), ["192.168.1.6:5555", "XYZ"])
+        self.assertEqual(E.novos_aparelhos(self.A, self.A[:1]), [])
+
+    def test_atualizar_mostra_os_novos_e_escolhe_um(self):
+        import types
+        import espelha_tela as E
+        app = E.App.__new__(E.App)
+        app.avisos, app.trocas = [], []
+        app.aviso_rapido = lambda t, s=6: app.avisos.append(t)
+        app.bt_atualizar = types.SimpleNamespace(define=lambda **k: None)
+        combo = {"values": [], "atual": ""}
+        app.combo = types.SimpleNamespace(__setitem__=None)
+        app.combo = type("C", (), {"__setitem__": lambda s, k, v: combo.__setitem__(k, v),
+                                   "set": lambda s, v: combo.__setitem__("atual", v), "get": lambda s: combo["atual"]})()
+        app.cap = types.SimpleNamespace(serial="", preferido="192.168.1.6:5555", aparelhos=[])
+        app.escolheu = lambda: app.trocas.append(combo["atual"].split(" ")[0])
+        app._aparelhos_atualizados(self.A[:1], self.A, "")
+        self.assertEqual(len(combo["values"]), 3)
+        self.assertEqual(app.trocas, ["192.168.1.6:5555"])  # o ultimo usado
+        self.assertIn("2 aparelhos prontos", app.avisos[-1])
+        self.assertIn("novos: 192.168.1.6:5555, XYZ", app.avisos[-1])
+        self.assertIn("1 outro sem autoriza", app.avisos[-1])
+        app.cap.serial = "0123abcd"  # ja tem aparelho pronto: nao troca
+        app._aparelhos_atualizados(self.A, self.A, "")
+        self.assertEqual(app.trocas, ["192.168.1.6:5555"])
+        self.assertIn("nenhum aparelho", (app._aparelhos_atualizados(self.A, [], "") or app.avisos[-1]))
+
+
 class LogDeOperacoes(unittest.TestCase):
     """Reportar bug leva o OPERATIONS mais recente do app (Android/data/<pacote>/files/SMARTPOS_LOG)."""
 

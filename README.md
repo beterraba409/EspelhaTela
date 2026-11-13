@@ -66,6 +66,7 @@ python espelha_tela.py
 | 🐞 | **Reportar bug** (F8) | Print, vídeo dos últimos 30 s, logcat, o log de operações mais recente do app (`OPERATIONS_*.log` de `Android/data`) e dados do aparelho/app numa pasta + `.zip`, com o texto do card do Jira (Descrição, Teste realizado, Resultado esperado e obtido) na área de transferência. |
 | 📈 | **Logcat ao vivo** | Log em tempo real com filtro por app, nível e busca; pausar, limpar e salvar. |
 | 📜 | **Exportar logcat** | O log dos últimos 2, 5 ou 10 minutos num arquivo, usando a hora do aparelho. |
+| ↻ | **Atualizar aparelhos** | Botão **Atualizar** ao lado da lista: procura na hora os aparelhos do adb (reconecta os de Wi-Fi salvos) e avisa os novos. Ao abrir, o Vision já mostra o último aparelho usado, ou o primeiro conectado. |
 | 🌐 | **Conectar pelo Wi-Fi** | Pelo IP (`adb connect`) ou **pareando com código** (Android 11+). O endereço fica salvo e é reconectado sozinho. |
 | 🔌 | **Aviso de adb e porta** | Detecta um `adb.cmd` ou `ADB_SERVER_PORT` apontando para um servidor sem aparelhos e oferece **Usar a porta N**. |
 | 📋 | **Copiar e colar** | **Ctrl+V** cola no aparelho o texto copiado no PC, com acentos. **Ctrl+C** copia a seleção do aparelho para o PC. O que um app copiar no aparelho (como o botão de copiar o serial) chega sozinho ao PC. **Botão direito** na tela copia o texto sob o mouse (até o que não dá para selecionar, como um serial) ou todo o texto da tela. |

@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.9 - botão Atualizar e aparelho já escolhido ao abrir
+
+- **Botão Atualizar** ao lado da lista de aparelhos: procura na hora os aparelhos conectados pelo adb (reconecta os de Wi-Fi salvos e os que estavam offline), atualiza a lista e avisa quantos estão prontos e quais são novos.
+- **Ao abrir, a lista já mostra um aparelho**: o último usado, se estiver conectado, senão o primeiro pronto. Antes, com mais de um aparelho, a lista abria em branco pedindo para escolher.
+
 ## 2.8 - log de operações no Reportar bug
 
 - **Reportar bug leva o log de operações do app**: no clique, o Vision procura o arquivo `OPERATIONS_*.log` mais recente em `Android/data` (o SmartPOS grava um por dia em `files/SMARTPOS_LOG`) e copia como ele está naquele instante. Se mais de um app tiver log, vale o do app que está na tela. Nova opção nos anexos, com o nome, o tamanho e o app; sem arquivo no aparelho, ela fica desmarcada e diz o motivo. A escolha fica guardada.

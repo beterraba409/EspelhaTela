@@ -85,7 +85,7 @@ import janela_config  # noqa: E402  (ligar e desligar as ferramentas da barra la
 import janela_emuladores  # noqa: E402  (Androids virtuais dentro do Vision)
 import emulador_avd  # noqa: E402
 
-VERSAO = "2.8"
+VERSAO = "2.9"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -210,6 +210,20 @@ def listar_aparelhos(adb):
             modelo = " ".join(campos.get("model", "").replace("_", " ").split())
             itens.append({"serial": p[0], "estado": p[1], "modelo": modelo})
     return itens
+
+
+def escolhe_aparelho(aparelhos, preferido=""):
+    """Serial a mostrar quando nenhum foi escolhido: o ultimo usado, se estiver pronto, senao o primeiro pronto."""
+    ok = [a["serial"] for a in aparelhos if a["estado"] == "device"]
+    if not ok:
+        return ""
+    return preferido if preferido in ok else ok[0]
+
+
+def novos_aparelhos(antes, depois):
+    """Seriais que apareceram (para o aviso do Atualizar)."""
+    vistos = {a["serial"] for a in antes}
+    return [a["serial"] for a in depois if a["serial"] not in vistos]
 
 
 ESTADOS = {"device": "", "unauthorized": "n\u00e3o autorizado", "offline": "offline", "recovery": "em recovery",
@@ -433,6 +447,7 @@ class Captura(threading.Thread):
         self.dev_size = None  # resolucao real do aparelho (para mapear cliques)
         self._dev_serial = ""
         self.aparelhos = []
+        self.preferido = ""  # ultimo aparelho usado: e ele que aparece ao abrir, se estiver conectado
         self.ips = []  # aparelhos de rede (ip:porta) a reconectar se o servidor adb reiniciar
         self._ult_lista = 0.0
         self.t_frame = 0.0
@@ -845,12 +860,12 @@ class Captura(threading.Thread):
                 time.sleep(0.2)
                 continue
             if not self.serial:
-                ok = [a for a in self.aparelhos if a["estado"] == "device"]
-                if len(ok) == 1:
-                    self.serial = ok[0]["serial"]
+                escolhido = escolhe_aparelho(self.aparelhos, self.preferido)
+                if escolhido:
+                    self.serial = escolhido  # ja aparece na lista ao abrir (antes, com varios, a lista ficava em branco)
                 else:
-                    self.erro = "V\u00e1rios aparelhos conectados. Escolha um na lista acima." if ok else (
-                        motivo_sem_aparelho(self.aparelhos) or "Nenhum aparelho conectado. Ligue a depura\u00e7\u00e3o USB e conecte o cabo, ou use o Wi-Fi.")
+                    self.erro = (motivo_sem_aparelho(self.aparelhos) or
+                                 "Nenhum aparelho conectado. Ligue a depura\u00e7\u00e3o USB e conecte o cabo, ou use o Wi-Fi.")
                     time.sleep(1.5)
                     continue
             try:
@@ -2544,6 +2559,9 @@ class App:
         self.combo.bind("<Button-3>", lambda e: self.menu_aparelho(self.cap.serial, e.x_root, e.y_root))
         self._liga_menu_da_lista()
         Dica(self.combo, "Aparelho", "Abra a lista e clique com o bot\u00e3o direito num aparelho para mais op\u00e7\u00f5es")
+        self.bt_atualizar = visual.Botao(topo, "atualizar", "Atualizar", comando=self.atualizar_aparelhos, largura=100, altura=30)
+        self.bt_atualizar.pack(side="left", padx=(6, 0))
+        Dica(self.bt_atualizar, "Atualizar", "Procura agora os aparelhos conectados pelo adb (USB e Wi-Fi salvos) e atualiza a lista")
         self.bt_ip = visual.Botao(topo, "rede", comando=self.conectar_ip, largura=36, altura=30, cor_icone=visual.AZUL)
         self.bt_ip.pack(side="left", padx=(6, 0))
         Dica(self.bt_ip, "Conectar pelo Wi-Fi", "Pelo IP ou pareando com c\u00f3digo (Android 11+). O endere\u00e7o fica salvo e \u00e9 reconectado sozinho")
@@ -3008,6 +3026,63 @@ class App:
     def tela_cheia(self):
         self.cheia = not self.cheia
         self.root.attributes("-fullscreen", self.cheia)
+
+    def atualizar_aparelhos(self):
+        """Botao Atualizar: reconecta os aparelhos de Wi-Fi salvos, tira os offline do limbo e le a lista na hora
+        (sem esperar a volta de 5 s do laco). Sem aparelho escolhido, ja mostra um."""
+        if getattr(self, "_atualizando", False):
+            return
+        self._atualizando = True
+        self.bt_atualizar.define(texto="Procurando…", desativado=True)
+        antes = list(self.cap.aparelhos)
+        adb = self.cap.adb
+
+        def trabalho():
+            erro = ""
+            try:
+                presentes = {a["serial"] for a in antes if a["estado"] == "device"}
+                for ip in list(self.cap.ips):
+                    if ip not in presentes:
+                        try:
+                            rodar([adb, "connect", ip], timeout=8)
+                        except Exception:  # noqa: BLE001
+                            pass
+                try:
+                    rodar([adb, "reconnect", "offline"], timeout=10)
+                except Exception:  # noqa: BLE001
+                    pass
+                depois = listar_aparelhos(adb)
+            except Exception as e:  # noqa: BLE001
+                depois, erro = antes, str(e)[:80]
+            self.na_interface(lambda: self._aparelhos_atualizados(antes, depois, erro))
+
+        threading.Thread(target=trabalho, daemon=True).start()
+
+    def _aparelhos_atualizados(self, antes, depois, erro):
+        self._atualizando = False
+        self.bt_atualizar.define(texto="Atualizar", desativado=False)
+        if erro:
+            return self.aviso_rapido("não consegui listar os aparelhos: " + erro, 6)
+        self.cap.aparelhos = depois
+        lista = [rotulo_aparelho(a) for a in depois]
+        self.combo["values"] = lista
+        if not self.cap.serial or self.cap.serial not in {a["serial"] for a in depois if a["estado"] == "device"}:
+            escolhido = escolhe_aparelho(depois, self.cap.preferido)
+            if escolhido and escolhido != self.cap.serial:
+                self.combo.set(next(x for x in lista if x.split(" ")[0] == escolhido))
+                self.escolheu()
+        novos = novos_aparelhos(antes, depois)
+        prontos = sum(1 for a in depois if a["estado"] == "device")
+        if not depois:
+            txt = "nenhum aparelho encontrado pelo adb: confira o cabo e a depuração USB"
+        else:
+            txt = "%s pronto%s" % (conta(prontos, "aparelho", "aparelhos"), "" if prontos == 1 else "s")
+            if novos:
+                txt += " · novo%s: %s" % ("" if len(novos) == 1 else "s", ", ".join(novos))
+            outros = len(depois) - prontos
+            if outros:
+                txt += " · %s sem autorização ou offline" % conta(outros, "outro", "outros")
+        self.aviso_rapido(txt, 6)
 
     def escolheu(self, _e=None):
         self.sel_nos = self.sel_hover = self.sel_fixo = None
@@ -4195,6 +4270,9 @@ class App:
             self.combo.set(atual)
         if cap.serial:
             self.inj.garantir(cap.serial)
+            if getattr(self, "lembra_aparelho", False) and self.config.get("ultimo_aparelho") != cap.serial:
+                self.config["ultimo_aparelho"] = cap.preferido = cap.serial
+                salvar_config(self.config)
         cor = FG2
         if self.ocupado:
             txt, cor = self.ocupado, ACENTO
@@ -4385,9 +4463,12 @@ def main():
         modo = "quadros"
     cap = Captura(adb, a.serial, a.intervalo_min, modo, perfil)
     cap.ips = list(cfg.get("ips") or [])
+    if not a.serial:  # sessao principal: abre no ultimo aparelho usado (as sessoes extras vem com --serial)
+        cap.preferido = cfg.get("ultimo_aparelho") or ""
     cap.start()
     root.deiconify()
     app = App(root, cap, versao, aviso)
+    app.lembra_aparelho = not a.serial
     app.adb_porta = info["porta"]
     threading.Thread(target=vigia_porta_adb, args=(app, info), daemon=True).start()
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.10 - duas janelas no mesmo aparelho sem derrubar o vídeo
+
+- **O vídeo não cai mais por causa de outra janela do Vision no mesmo aparelho**: ao abrir o vídeo, o Vision encerrava todas as gravações de tela do aparelho, inclusive a de outra janela do Vision ainda aberta. As duas se derrubavam e o vídeo ia para o modo quadros ("Invalid data… avcodec_send_packet"). Agora cada gravação leva a marca da sua janela, e cada janela encerra só as suas e as que sobraram de um Vision deste PC que já fechou. Gravações de outro PC ou de outras ferramentas não são encerradas.
+- Fechar uma gravação encerra só ela no aparelho; antes encerrava também a nova, que acabava de abrir.
+- Versões antigas abertas ao mesmo tempo ainda encerram tudo: atualize todas as janelas.
+
 ## 2.9 - botão Atualizar e aparelho já escolhido ao abrir
 
 - **Botão Atualizar** ao lado da lista de aparelhos: procura na hora os aparelhos conectados pelo adb (reconecta os de Wi-Fi salvos e os que estavam offline), atualiza a lista e avisa quantos estão prontos e quais são novos.

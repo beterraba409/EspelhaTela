@@ -35,6 +35,7 @@ import posixpath
 import queue
 import re
 import shutil
+import socket
 import struct
 import subprocess
 import sys
@@ -85,7 +86,7 @@ import janela_config  # noqa: E402  (ligar e desligar as ferramentas da barra la
 import janela_emuladores  # noqa: E402  (Androids virtuais dentro do Vision)
 import emulador_avd  # noqa: E402
 
-VERSAO = "2.9"
+VERSAO = "2.10"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -273,10 +274,73 @@ PERFIS_VIDEO = {  # lado maior em pixels (0 = nativo) e taxa de bits
 }
 
 
-def parar_gravacao_remota(adb, serial):
-    """Encerra um screenrecord que tenha ficado vivo no aparelho (matar o adb local não basta)."""
+# Cada gravacao aberta pelo Vision leva no ambiente VISION_GRAVACAO=<pc>_<pid do Vision>_<n>. Assim cada sessao
+# encerra so o que e dela: antes, abrir o video matava TODO screenrecord do aparelho, inclusive o de outra
+# janela do Vision viva no mesmo aparelho, e as duas derrubavam o video uma da outra sem parar.
+PC_ID = re.sub(r"[^A-Za-z0-9]", "", socket.gethostname())[:20] or "pc"
+SESSAO = "%s_%d" % (PC_ID, os.getpid())
+_n_gravacao = [0]
+COMANDO_GRAVACOES = (r'''for p in $(pidof screenrecord 2>/dev/null); do '''
+                     r'''m=$(tr '\0' '\n' < /proc/$p/environ 2>/dev/null | grep '^VISION_GRAVACAO='); '''
+                     r'''echo "$p ${m#VISION_GRAVACAO=}"; done''')
+
+
+def nova_marca_gravacao():
+    _n_gravacao[0] += 1
+    return "%s_%d" % (SESSAO, _n_gravacao[0])
+
+
+def processo_vivo(pid):
+    """O processo do PC ainda existe? (no Windows sem os.kill: o sinal 0 la e CTRL_C_EVENT)"""
+    if os.name != "nt":
+        try:
+            os.kill(pid, 0)
+            return True
+        except OSError:
+            return False
+    import ctypes
+    k = ctypes.windll.kernel32
+    h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not h:
+        return ctypes.GetLastError() == 5  # acesso negado: existe, so nao e nosso
     try:
-        rodar([adb, "-s", serial, "shell", "pids=$(pidof screenrecord 2>/dev/null); [ -n \"$pids\" ] && kill $pids; true"], timeout=8)
+        codigo = ctypes.c_ulong(0)
+        return bool(k.GetExitCodeProcess(h, ctypes.byref(codigo))) and codigo.value == 259  # STILL_ACTIVE
+    finally:
+        k.CloseHandle(h)
+
+
+def gravacoes_a_encerrar(saida, marcas=None, sessao=SESSAO, vivo=processo_vivo):
+    """PIDs (no aparelho) dos screenrecord a encerrar, pela saida de COMANDO_GRAVACOES.
+    Com `marcas`: so essas gravacoes. Sem: as desta sessao e as orfas deste PC (Vision que ja fechou).
+    Gravacao de outra sessao viva, de outro PC ou sem marca (outra ferramenta) nunca e encerrada."""
+    pc, _, meu_pid = sessao.rpartition("_")
+    pids = []
+    for linha in (saida or "").splitlines():
+        partes = linha.split()
+        if not partes or not partes[0].isdigit():
+            continue
+        marca = partes[1] if len(partes) > 1 else ""
+        if marcas is not None:
+            if marca in marcas:
+                pids.append(partes[0])
+            continue
+        m = re.match(r"^(.+)_(\d+)_(\d+)$", marca)
+        if not m or m.group(1) != pc:
+            continue
+        if m.group(2) == meu_pid or not vivo(int(m.group(2))):
+            pids.append(partes[0])
+    return pids
+
+
+def parar_gravacao_remota(adb, serial, marcas=None):
+    """Encerra no aparelho as gravacoes desta sessao (ou so `marcas`) e as orfas deste PC: matar o adb
+    local nao basta, o screenrecord continua vivo la."""
+    try:
+        _, out, _ = rodar([adb, "-s", serial, "shell", COMANDO_GRAVACOES], timeout=8)
+        pids = gravacoes_a_encerrar(out, marcas)
+        if pids:
+            rodar([adb, "-s", serial, "shell", "kill %s; true" % " ".join(pids)], timeout=8)
     except Exception:
         pass
 
@@ -572,13 +636,14 @@ class Captura(threading.Thread):
     def _abre_fluxo(self, serial, size, taxa, candidato=False):
         """Uma gravacao (screenrecord) com seu decodificador. Os quadros so vao para a tela se ela for
         a gravacao ativa; uma candidata assume no primeiro quadro (troca sem pausa)."""
-        cmd = [self.adb, "-s", serial, "exec-out", "screenrecord", "--output-format=h264", "--bit-rate", taxa,
+        marca = nova_marca_gravacao()  # no ambiente do screenrecord: so esta sessao encerra esta gravacao
+        cmd = [self.adb, "-s", serial, "exec-out", "VISION_GRAVACAO=" + marca, "screenrecord", "--output-format=h264", "--bit-rate", taxa,
                "--time-limit", str(self.LIMITE_GRAVACAO)]
         if size:
             cmd += ["--size", size]
         cmd.append("-")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=SEM_JANELA, bufsize=0)
-        f = {"proc": proc, "frames": 0, "erro": "", "stderr": b"", "inicio": time.time(), "candidato": candidato,
+        f = {"proc": proc, "marca": marca, "serial": serial, "frames": 0, "erro": "", "stderr": b"", "inicio": time.time(), "candidato": candidato,
              "t_primeiro": None, "t_fim": None, "cortados": 0}
 
         def drena_erro():  # sem isso o pipe de erro pode encher e travar o screenrecord
@@ -722,8 +787,7 @@ class Captura(threading.Thread):
                 partes.append("processador: não disponível neste aparelho")
             self.diag.aparelho(" | ".join(partes))
 
-    @staticmethod
-    def _fecha_fluxo(f):
+    def _fecha_fluxo(self, f):
         if f is None:
             return
         try:
@@ -731,6 +795,8 @@ class Captura(threading.Thread):
         except Exception:
             pass
         f["leitor"].join(timeout=1.0)
+        # o screenrecord continua vivo no aparelho: encerra so ESTA gravacao (a proxima, ja aberta, segue)
+        threading.Thread(target=parar_gravacao_remota, args=(self.adb, f["serial"], [f["marca"]]), daemon=True).start()
 
     def _stream(self, size, taxa):
         """Video continuo: gravacoes de ate 180 s emendadas sem pausa (a proxima abre antes do fim da
@@ -792,8 +858,7 @@ class Captura(threading.Thread):
                 continue
             time.sleep(0.1)
         self._fecha_fluxo(proximo)
-        self._fecha_fluxo(atual)
-        threading.Thread(target=parar_gravacao_remota, args=(self.adb, serial), daemon=True).start()
+        self._fecha_fluxo(atual)  # cada uma encerra a sua gravacao no aparelho (antes: todas, ate a nova)
         if motivo == "interrompido":
             return "interrompido"
         if atual["frames"] > 0 or teve_quadro:

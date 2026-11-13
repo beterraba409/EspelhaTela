@@ -1045,6 +1045,36 @@ class QuadroCompartilhado(unittest.TestCase):
             self.assertGreater(g.gravados, 1)
 
 
+class GravacoesDeOutrasSessoes(unittest.TestCase):
+    """Vision 2.9: cada sessao encerra so as gravacoes dela e as orfas do PC (antes matava todas)."""
+
+    SAIDA = ("13925 \n"                    # sem marca: Vision antigo ou outra ferramenta
+             "14001 PCX_100_3\n"            # desta sessao
+             "14002 PCX_200_1\n"            # outra janela do Vision viva neste PC
+             "14003 PCX_300_2\n"            # Vision deste PC que ja fechou (orfa)
+             "14004 OUTROPC_300_1\n"        # outro PC (aparelho por Wi-Fi)
+             "lixo\n")
+
+    def test_so_desta_sessao_e_orfas(self):
+        import espelha_tela as E
+        vivos = {100, 200}
+        pids = E.gravacoes_a_encerrar(self.SAIDA, sessao="PCX_100", vivo=lambda p: p in vivos)
+        self.assertEqual(pids, ["14001", "14003"])
+
+    def test_so_a_gravacao_pedida(self):
+        import espelha_tela as E
+        self.assertEqual(E.gravacoes_a_encerrar(self.SAIDA, ["PCX_100_3"], sessao="PCX_100", vivo=lambda p: True), ["14001"])
+        self.assertEqual(E.gravacoes_a_encerrar("", sessao="PCX_100"), [])
+
+    def test_marcas_unicas_e_processo_vivo(self):
+        import espelha_tela as E
+        a, b = E.nova_marca_gravacao(), E.nova_marca_gravacao()
+        self.assertNotEqual(a, b)
+        self.assertTrue(a.startswith(E.SESSAO + "_"))
+        self.assertTrue(E.processo_vivo(os.getpid()))
+        self.assertFalse(E.processo_vivo(999999))
+
+
 class ListaDeAparelhos(unittest.TestCase):
     """Vision 2.9: ao abrir ja mostra um aparelho; botao Atualizar le a lista na hora."""
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.8 - log de operações no Reportar bug
+
+- **Reportar bug leva o log de operações do app**: no clique, o Vision procura o arquivo `OPERATIONS_*.log` mais recente em `Android/data` (o SmartPOS grava um por dia em `files/SMARTPOS_LOG`) e copia como ele está naquele instante. Se mais de um app tiver log, vale o do app que está na tela. Nova opção nos anexos, com o nome, o tamanho e o app; sem arquivo no aparelho, ela fica desmarcada e diz o motivo. A escolha fica guardada.
+
 ## 2.7 - gravação em MP4 volta a funcionar e Parar sempre à vista
 
 - **Gravar tela em MP4 falhava** com "No module named 'numpy'" (2.5 e 2.6) quando o vídeo já chegava no tamanho do arquivo: a gravação usava uma biblioteca que não vai dentro do Vision.exe. Corrigido; o GIF não era afetado.

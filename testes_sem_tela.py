@@ -1045,6 +1045,32 @@ class QuadroCompartilhado(unittest.TestCase):
             self.assertGreater(g.gravados, 1)
 
 
+class LogDeOperacoes(unittest.TestCase):
+    """Reportar bug leva o OPERATIONS mais recente do app (Android/data/<pacote>/files/SMARTPOS_LOG)."""
+
+    SAIDA = ("1794592324 1446948 /sdcard/Android/data/com.smartposv2.linxtef/files/SMARTPOS_LOG/OPERATIONS_20261113.log\n"
+             "1794000000 900000 /sdcard/Android/data/com.smartposv2.linxtef/files/SMARTPOS_LOG/OPERATIONS_20261112.log\n"
+             "1794600000 2048 /sdcard/Android/data/com.outro/files/SMARTPOS_LOG/OPERATIONS_20261113.log\n"
+             "find: /sdcard/Android/data/x: Permission denied\n")
+
+    def test_prefere_o_app_da_tela_e_o_mais_recente(self):
+        import janela_bug as J
+        self.assertEqual(J.escolhe_log_app(self.SAIDA, "com.smartposv2.linxtef"),
+                         ("/sdcard/Android/data/com.smartposv2.linxtef/files/SMARTPOS_LOG/OPERATIONS_20261113.log", 1446948))
+
+    def test_sem_app_na_tela_pega_o_mais_recente_de_todos(self):
+        import janela_bug as J
+        self.assertEqual(J.escolhe_log_app(self.SAIDA, "com.android.launcher")[0],
+                         "/sdcard/Android/data/com.outro/files/SMARTPOS_LOG/OPERATIONS_20261113.log")
+        self.assertIsNone(J.escolhe_log_app("", "x"))
+        self.assertIsNone(J.escolhe_log_app("find: sem permissao\n"))
+
+    def test_tamanho(self):
+        import janela_bug as J
+        self.assertEqual(J.tamanho_legivel(1446948), "1,4 MB")
+        self.assertEqual(J.tamanho_legivel(2048), "2 KB")
+
+
 class GravarSemNumpy(unittest.TestCase):
     """O Vision.exe nao leva numpy: gravar MP4 com o video ja no tamanho do arquivo quebrava na 2.5/2.6."""
 

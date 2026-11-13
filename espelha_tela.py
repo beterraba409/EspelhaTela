@@ -85,7 +85,7 @@ import janela_config  # noqa: E402  (ligar e desligar as ferramentas da barra la
 import janela_emuladores  # noqa: E402  (Androids virtuais dentro do Vision)
 import emulador_avd  # noqa: E402
 
-VERSAO = "2.7"
+VERSAO = "2.8"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -3452,6 +3452,19 @@ class App:
             if c.pacote:
                 v = versoes_no_aparelho(adb, serial, [c.pacote]).get(c.pacote, (None, None))
                 c.versao_app = "" if v[0] is False else texto_versao(*v)
+            try:  # o log de operacoes do app como esta no instante do clique (o SmartPOS grava um por dia)
+                _, out, _ = rodar([adb, "-s", serial, "shell", janela_bug.COMANDO_LOGS_APP], timeout=20)
+                c.log_app = janela_bug.escolhe_log_app(out, c.pacote)
+                if c.log_app:
+                    local = os.path.join(c.temp, posixpath.basename(c.log_app[0]))
+                    rc, _, _ = rodar([adb, "-s", serial, "pull", c.log_app[0], local], timeout=180)
+                    if rc == 0 and os.path.exists(local):
+                        c.log_app_local = local
+                    else:
+                        c.erros.append("sem o log de operações")
+            except Exception:  # noqa: BLE001
+                if c.log_app:
+                    c.erros.append("sem o log de operações")
             try:
                 c.logcat, _, _ = exportar_logcat(adb, serial, janela_bug.MINUTOS_LOGCAT, c.temp)
             except Exception:  # noqa: BLE001
@@ -3492,6 +3505,10 @@ class App:
                 if dados["logcat"] and c.logcat and os.path.exists(c.logcat):
                     shutil.move(c.logcat, os.path.join(pasta, "logcat.txt"))
                     anexos.append("logcat.txt")
+                if dados.get("log_app") and c.log_app_local and os.path.exists(c.log_app_local):
+                    nome = os.path.basename(c.log_app_local)
+                    shutil.move(c.log_app_local, os.path.join(pasta, nome))
+                    anexos.append(nome)
                 ambiente = janela_bug.ambiente_de(c.props, nome_ap, c.pacote, c.versao_app, agora, VERSAO) if dados["info"] else []
                 texto = janela_bug.texto_bug(dados["titulo"], dados["campos"], ambiente, anexos)
                 with open(os.path.join(pasta, "bug.md"), "w", encoding="utf-8") as f:

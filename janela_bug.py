@@ -46,6 +46,30 @@ COMANDO_APARELHO = ("for p in ro.product.manufacturer ro.product.model ro.build.
                     "ro.serialno; do echo \"$p=$(getprop $p)\"; done")
 
 
+# log de operacoes do app (o SmartPOS grava um por dia em Android/data/<pacote>/files/SMARTPOS_LOG/OPERATIONS_<data>.log):
+# lista "instante tamanho caminho" de cada arquivo OPERATIONS* de qualquer app, sem depender da pasta exata
+COMANDO_LOGS_APP = ("find /sdcard/Android/data -maxdepth 5 -type f -iname 'OPERATIONS*' "
+                    "-exec stat -c '%Y %s %n' {} \\; 2>/dev/null")
+
+
+def escolhe_log_app(saida, pacote=""):
+    """O arquivo OPERATIONS mais recente: (caminho, bytes) ou None. Se o app da tela tem log, e o dele."""
+    achados = []
+    for linha in (saida or "").splitlines():
+        partes = linha.strip().split(" ", 2)
+        if len(partes) == 3 and partes[0].isdigit() and partes[1].isdigit():
+            achados.append((int(partes[0]), int(partes[1]), partes[2]))
+    if not achados:
+        return None
+    do_app = [a for a in achados if pacote and "/Android/data/%s/" % pacote in a[2]]
+    t, tam, caminho = max(do_app or achados)
+    return caminho, tam
+
+
+def tamanho_legivel(n):
+    return ("%.1f MB" % (n / 1048576.0)).replace(".", ",") if n >= 1048576 else "%d KB" % max(1, round(n / 1024.0))
+
+
 def texto_bug(titulo, campos, ambiente, anexos):
     """Texto do card (Markdown, que o Jira aceita colado)."""
     partes = ["**%s**" % (titulo.strip() or "Bug"), ""]
@@ -93,6 +117,8 @@ class Coleta:
         self.quadros = []
         self.t_clique = None
         self.erros = []
+        self.log_app = None  # (caminho no aparelho, bytes) do OPERATIONS mais recente
+        self.log_app_local = None  # copia dele no PC, trazida no instante do clique
 
 
 class JanelaBug:
@@ -137,6 +163,7 @@ class JanelaBug:
         self.var_video = tk.BooleanVar(value=dur >= 1)
         self.var_log = tk.BooleanVar(value=True)
         self.var_info = tk.BooleanVar(value=True)
+        self.var_log_app = tk.BooleanVar(value=config.get("bug_log_app", True))
         estilo = "Bug.TCheckbutton"
         ttk.Style(w).configure(estilo, background=visual.BG2)
         self.cks = []
@@ -147,6 +174,10 @@ class JanelaBug:
                                (self.var_info, "Aparelho, Android e o app em primeiro plano com a versão (no texto do card)", True)):
             ck = ttk.Checkbutton(caixa, text=texto, variable=var, style=estilo, state="normal" if ok else "disabled")
             ck.pack(anchor="w", pady=1)
+        # o arquivo so e conhecido quando a coleta termina: o texto e atualizado em _mostra_coleta
+        self.ck_log_app = ttk.Checkbutton(caixa, text="Log de operações do app (OPERATIONS): procurando no aparelho…",
+                                          variable=self.var_log_app, style=estilo)
+        self.ck_log_app.pack(anchor="w", pady=1)
         self.var_memoria = tk.BooleanVar(value=config.get("guardar_recentes", True))
         ttk.Checkbutton(corpo, text="Guardar sempre os últimos 30 s do espelho para o Reportar bug (usa cerca de 10 MB de memória)",
                         variable=self.var_memoria).pack(anchor="w", pady=(8, 0))
@@ -180,11 +211,23 @@ class JanelaBug:
             if self.coleta.pronto.is_set():
                 extra = ("  (%s)" % "; ".join(self.coleta.erros)) if self.coleta.erros else ""
                 self.status.configure(text="tela e dados do aparelho guardados" + extra, fg=visual.FG2)
+                self._mostra_log_app()
             else:
                 self.status.configure(text="guardando a tela e os dados do aparelho…", fg=visual.ACENTO)
                 self.win.after(300, self._mostra_coleta)
         except tk.TclError:
             pass
+
+    def _mostra_log_app(self):
+        c = self.coleta
+        if c.log_app and c.log_app_local:
+            nome = c.log_app[0].rsplit("/", 1)[-1]
+            pkg = c.log_app[0].split("/Android/data/", 1)[-1].split("/", 1)[0]
+            self.ck_log_app.configure(text="Log de operações mais recente do app: %s (%s, %s)" % (nome, tamanho_legivel(c.log_app[1]), pkg))
+        else:
+            self.var_log_app.set(False)
+            motivo = "não consegui copiar" if c.log_app else "nenhum arquivo OPERATIONS em Android/data"
+            self.ck_log_app.configure(text="Log de operações do app (%s)" % motivo, state="disabled")
 
     def _escolhe_pasta(self):
         p = filedialog.askdirectory(title="Onde salvar os relatórios de bug?", initialdir=self.var_pasta.get(), parent=self.win)
@@ -200,9 +243,11 @@ class JanelaBug:
             "titulo": titulo,
             "campos": {k: t.get("1.0", "end").strip() for k, t in self.textos.items()},
             "print": self.var_print.get(), "video": self.var_video.get(), "logcat": self.var_log.get(), "info": self.var_info.get(),
-            "pasta": self.var_pasta.get(),
+            "log_app": self.var_log_app.get(), "pasta": self.var_pasta.get(),
         }
         self.config.update(pasta_bugs=dados["pasta"], guardar_recentes=bool(self.var_memoria.get()))
+        if str(self.ck_log_app.cget("state")) != "disabled":
+            self.config["bug_log_app"] = bool(self.var_log_app.get())  # lembra a escolha (sem arquivo nao conta)
         self.gerou = True
         self.win.destroy()
         self.ao_gerar(dados)

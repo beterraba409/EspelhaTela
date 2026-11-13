@@ -63,7 +63,7 @@ python espelha_tela.py
 | 📁 | **Arquivos** | Navegar, baixar e enviar com barra de progresso e Cancelar, **arrastar arquivos do Explorer** para a pasta aberta, abrir no PC, criar pasta, renomear e excluir (em `/sdcard`, `/storage` e `/data/local/tmp`). |
 | 🎬 | **Gravar tela** | Grava o espelho em **MP4** ou **GIF** (até 60 s), com os **toques visíveis** se quiser, na pasta e com o nome que você escolher. Durante a gravação, uma barra vermelha acima do espelho mostra o tempo e o botão **Parar e salvar** (ou `F12`). |
 | 📊 | **Memória** | Gerenciador de tarefas com RSS por processo, PSS sob demanda, variação desde o início, gráficos e exportação para CSV. |
-| 🐞 | **Reportar bug** (F8) | Print, vídeo dos últimos 30 s, logcat e dados do aparelho/app numa pasta + `.zip`, com o texto do card do Jira (Descrição, Teste realizado, Resultado esperado e obtido) na área de transferência. |
+| 🐞 | **Reportar bug** (F8) | Print, vídeo dos últimos 30 s, logcat, o log de operações mais recente do app (`OPERATIONS_*.log` de `Android/data`) e dados do aparelho/app numa pasta + `.zip`, com o texto do card do Jira (Descrição, Teste realizado, Resultado esperado e obtido) na área de transferência. |
 | 📈 | **Logcat ao vivo** | Log em tempo real com filtro por app, nível e busca; pausar, limpar e salvar. |
 | 📜 | **Exportar logcat** | O log dos últimos 2, 5 ou 10 minutos num arquivo, usando a hora do aparelho. |
 | 🌐 | **Conectar pelo Wi-Fi** | Pelo IP (`adb connect`) ou **pareando com código** (Android 11+). O endereço fica salvo e é reconectado sozinho. |

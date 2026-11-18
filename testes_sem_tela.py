@@ -1045,6 +1045,136 @@ class QuadroCompartilhado(unittest.TestCase):
             self.assertGreater(g.gravados, 1)
 
 
+class ConectarPeloIp(unittest.TestCase):
+    """Vision 2.11: conectar pelo IP acha a porta da Depuracao por Wi-Fi, explica a falha e liga o Wi-Fi pelo cabo."""
+
+    def _adb(self, respostas):
+        feitos = []
+
+        def rodar(cmd, timeout=0):
+            feitos.append(" ".join(cmd[1:]))
+            for chave, resp in respostas:
+                if chave in " ".join(cmd[1:]):
+                    return 0, resp, ""
+            return 0, "", ""
+        return rodar, feitos
+
+    def test_sem_porta_usa_a_da_depuracao_por_wifi(self):
+        import janela_wifi as J
+        rodar, feitos = self._adb([("mdns", "adb-X _adb-tls-connect._tcp 192.168.1.5:41235\n"),
+                                   ("connect 192.168.1.5:41235", "connected to 192.168.1.5:41235")])
+        self.assertEqual(J.conectar_por_ip(rodar, "adb", "192.168.1.5", sonda=lambda i, p: "aberta"),
+                         ("192.168.1.5:41235", "conectado em 192.168.1.5:41235", False))
+        self.assertNotIn("connect 192.168.1.5:5555", feitos)
+
+    def test_recusada_explica_como_ligar(self):
+        import janela_wifi as J
+        rodar, feitos = self._adb([("connect", "cannot connect to 192.168.1.5:5555: recusou (10061)")])
+        end, msg, _ = J.conectar_por_ip(rodar, "adb", "192.168.1.5", sonda=lambda i, p: "recusada")
+        self.assertIsNone(end)
+        self.assertIn("depuração por rede está desligada", msg)
+        self.assertIn("pelo cabo", msg)
+        end, msg, _ = J.conectar_por_ip(rodar, "adb", "192.168.1.5:5555", sonda=lambda i, p: "sem_resposta")
+        self.assertIn("não respondeu", msg)
+        self.assertNotIn("mdns services", feitos[-1])
+
+    def test_pedindo_autorizacao(self):
+        import janela_wifi as J
+        rodar, _ = self._adb([("connect", "failed to authenticate to 192.168.1.5:5555")])
+        end, msg, aguardando = J.conectar_por_ip(rodar, "adb", "192.168.1.5:5555")
+        self.assertEqual((end, aguardando), ("192.168.1.5:5555", True))
+        self.assertIn("Permitir depuração", msg)
+
+    def test_liga_o_wifi_pelo_cabo(self):
+        import janela_wifi as J
+        rodar, feitos = self._adb([("ip -f inet", "    inet 192.168.1.13/24 brd 192.168.1.255 scope global wlan0\n"),
+                                   ("tcpip", "restarting in TCP mode port: 5555"),
+                                   ("connect 192.168.1.13:5555", "connected to 192.168.1.13:5555")])
+        end, msg = J.ligar_wifi_pelo_cabo(rodar, "adb", "PB4N", pausa=0)
+        self.assertEqual(end, "192.168.1.13:5555")
+        self.assertIn("-s PB4N tcpip 5555", feitos)
+        rodar, _ = self._adb([("ip -f inet", "")])
+        self.assertIsNone(J.ligar_wifi_pelo_cabo(rodar, "adb", "PB4N", pausa=0)[0])
+
+    def test_sonda_porta(self):
+        import socket
+        import janela_wifi as J
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        porta = srv.getsockname()[1]
+        self.assertEqual(J.sonda_porta("127.0.0.1", porta), "aberta")
+        srv.close()
+        self.assertEqual(J.sonda_porta("127.0.0.1", porta), "recusada")
+
+
+class QuadrosAosPedacos(unittest.TestCase):
+    """Vision 2.11: aparelho que manda cada quadro com pausas no meio (Samsung, video por tty) borrava a imagem."""
+
+    def test_pausa_no_meio_do_quadro_nao_borra_a_tela(self):
+        import fractions
+        import time
+        import av
+        import numpy as np
+        import espelha_tela as E
+        n, w, h = 20, 176, 320
+        rng = np.random.default_rng(3)
+        enc = av.CodecContext.create("libx264", "w")
+        enc.width, enc.height, enc.pix_fmt = w, h, "yuv420p"
+        enc.time_base = fractions.Fraction(1, 30)
+        enc.options = {"tune": "zerolatency", "preset": "ultrafast", "bitrate": "3000k", "x264-params": "keyint=600:scenecut=0"}
+        base = rng.integers(0, 255, (h, w, 3), np.uint8)
+        with tempfile.TemporaryDirectory() as d:
+            certos, ref = [], av.CodecContext.create("h264", "r")
+            for i in range(n):
+                img = base.copy()
+                img[(i * 13) % (h - 100):(i * 13) % (h - 100) + 100] = rng.integers(0, 255, (100, w, 3), np.uint8)
+                fr = av.VideoFrame.from_ndarray(img, format="rgb24").reformat(format="yuv420p")
+                fr.pts = i
+                dados = b"".join(bytes(p) for p in enc.encode(fr))
+                with open(os.path.join(d, "q%d.h264" % i), "wb") as f:
+                    f.write(dados)
+                for pkt in ref.parse(dados):
+                    certos += [q.to_ndarray(format="gray").astype(np.int16) for q in ref.decode(pkt)]
+            for pkt in ref.parse(None):
+                certos += [q.to_ndarray(format="gray").astype(np.int16) for q in ref.decode(pkt)]
+            falso = os.path.join(d, "aparelho.py")
+            with open(falso, "w") as f:  # 5 quadros inteiros, depois cada um em 3 pedacos com 60 ms entre eles
+                f.write(chr(10).join([
+                    "import os, sys, time",
+                    "for i in range(%d):" % n,
+                    "    b = open(os.path.join(%r, 'q%%d.h264' %% i), 'rb').read()" % d,
+                    "    t = len(b) // 3",
+                    "    for parte in ((b,) if i < 5 else (b[:t], b[t:2*t], b[2*t:])):",
+                    "        sys.stdout.buffer.write(parte); sys.stdout.flush(); time.sleep(0.06)",
+                    "    time.sleep(0.1)",
+                    "time.sleep(1)", ""]))
+            original = E.subprocess.Popen
+            E.subprocess.Popen = lambda cmd, **k: original([sys.executable, falso], **k)
+            try:
+                cap = E.Captura("adb", "falso", 0.05)
+                fluxo = cap._abre_fluxo("falso", None, "3M")
+                cap._fluxo_ativo = fluxo
+                mostrados, visto, fim = [], None, time.time() + n * 0.35 + 1.5
+                while time.time() < fim:
+                    fr = cap._av
+                    if fr is not None and fr is not visto:
+                        visto = fr
+                        mostrados.append(fr.to_ndarray(format="gray").astype(np.int16))
+                    time.sleep(0.002)
+                errados = sum(1 for m in mostrados if min(float(np.abs(m - c).mean()) for c in certos) > 2)
+                self.assertLessEqual(errados, 1)  # so o quadro liberado incompleto, antes de o corte ser percebido
+                self.assertLessEqual(fluxo["cortados"], 2)  # aprendeu a esperar: nao corta de novo a cada quadro
+                self.assertGreater(cap.quieto_de("falso"), E.Captura.QUIETO)
+                self.assertTrue(np.abs(mostrados[-1] - certos[4]).mean() < 2 or errados == 0)  # parada no ultimo quadro bom
+                fluxo["proc"].kill()
+                fluxo["proc"].wait(5)
+                fluxo["proc"].stdout.close()
+                fluxo["proc"].stderr.close()
+            finally:
+                E.subprocess.Popen = original
+
+
 class GravacoesDeOutrasSessoes(unittest.TestCase):
     """Vision 2.9: cada sessao encerra so as gravacoes dela e as orfas do PC (antes matava todas)."""
 

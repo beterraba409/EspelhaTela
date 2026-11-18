@@ -67,7 +67,7 @@ python espelha_tela.py
 | 📈 | **Logcat ao vivo** | Log em tempo real com filtro por app, nível e busca; pausar, limpar e salvar. |
 | 📜 | **Exportar logcat** | O log dos últimos 2, 5 ou 10 minutos num arquivo, usando a hora do aparelho. |
 | ↻ | **Atualizar aparelhos** | Botão **Atualizar** ao lado da lista: procura na hora os aparelhos do adb (reconecta os de Wi-Fi salvos) e avisa os novos. Ao abrir, o Vision já mostra o último aparelho usado, ou o primeiro conectado. |
-| 🌐 | **Conectar pelo Wi-Fi** | Pelo IP (`adb connect`) ou **pareando com código** (Android 11+). O endereço fica salvo e é reconectado sozinho. |
+| 🌐 | **Conectar pelo Wi-Fi** | Pelo IP (acha sozinho a porta da Depuração por Wi-Fi e diz o motivo quando não conecta), **pareando com código** (Android 11+) ou **ligando o Wi-Fi pelo cabo** (um clique num aparelho no USB). O endereço fica salvo e é reconectado sozinho. |
 | 🔌 | **Aviso de adb e porta** | Detecta um `adb.cmd` ou `ADB_SERVER_PORT` apontando para um servidor sem aparelhos e oferece **Usar a porta N**. |
 | 📋 | **Copiar e colar** | **Ctrl+V** cola no aparelho o texto copiado no PC, com acentos. **Ctrl+C** copia a seleção do aparelho para o PC. O que um app copiar no aparelho (como o botão de copiar o serial) chega sozinho ao PC. **Botão direito** na tela copia o texto sob o mouse (até o que não dá para selecionar, como um serial) ou todo o texto da tela. |
 | 📱 | **Emuladores** | Cria e liga Androids virtuais (perfil SmartPOS, celular ou tablet) que aparecem no espelho; baixa o que faltar do Google, com estados salvos e vários ao mesmo tempo. |

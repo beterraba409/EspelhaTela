@@ -81,13 +81,106 @@ def parear_e_conectar(rodar, adb, end_pareamento, codigo, end_conexao="", avisa=
     return None, "pareado, mas a conexão em %s falhou: %s" % (alvo, saida[-200:] or "sem resposta")
 
 
-class JanelaWifi:
-    """`ao_conectar(endereco, saida_do_connect)` para o modo IP (reaproveita o tratamento do app);
-    `ao_parear(endereco)` quando o pareamento conectou."""
+def sonda_porta(ip, porta, espera=4.0):
+    """'aberta', 'recusada' (o aparelho respondeu, mas nada escuta na porta) ou 'sem_resposta' (fora da rede,
+    IP errado ou roteador isolando os aparelhos). O Windows so diz "recusada" depois de ~2 s (ele repete a
+    tentativa), por isso a espera passa disso."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(espera)
+    try:
+        codigo = s.connect_ex((ip, int(porta)))
+    except OSError:
+        return "sem_resposta"
+    finally:
+        s.close()
+    if codigo == 0:
+        return "aberta"
+    return "recusada" if codigo in (10061, 111, 61) else "sem_resposta"  # ECONNREFUSED no Windows, Linux e macOS
 
-    def __init__(self, raiz, adb, rodar, config, ao_conectar, ao_parear, icone=None):
+
+def explica_falha(ip, porta, estado, saida=""):
+    """Mensagem do que fazer quando o `adb connect` nao conectou."""
+    if estado == "recusada":
+        return ("O aparelho %s está na rede, mas não aceita conexão na porta %s: a depuração por rede está desligada nele. "
+                "Ligue de um destes jeitos:\n"
+                "•  Com o cabo USB ligado: use “Ligar o Wi-Fi pelo cabo” abaixo (qualquer Android).\n"
+                "•  Android 11 ou mais novo: Opções do desenvolvedor › Depuração por Wi-Fi, e use a aba “Parear com código”."
+                % (ip, porta))
+    if estado == "sem_resposta":
+        return ("O aparelho %s não respondeu. Confira o IP (Configurações › Wi-Fi › rede conectada) e se o PC e o "
+                "aparelho estão na mesma rede: redes de visitante costumam isolar os aparelhos." % ip)
+    linha = [l for l in (saida or "").splitlines() if l.strip()]
+    return "Não consegui conectar em %s:%s: %s" % (ip, porta, linha[-1] if linha else "sem resposta")
+
+
+def conectar_por_ip(rodar, adb, txt, sonda=sonda_porta, avisa=lambda t: None):
+    """Conecta pelo IP. Sem porta, procura antes a da Depuracao por Wi-Fi (Android 11+) anunciada na rede e
+    so depois tenta a 5555. Devolve (endereco | None, mensagem, pendente_de_autorizacao)."""
+    ip, _, porta = txt.strip().partition(":")
+    alvos = ["%s:%s" % (ip, porta)] if porta else []
+    if not porta:
+        avisa("procurando o aparelho %s na rede…" % ip)
+        try:
+            _, out, _ = rodar([adb, "mdns", "services"], timeout=15)
+            achado = porta_de_conexao(out, ip)
+            if achado:
+                alvos.append(achado)
+        except Exception:  # noqa: BLE001
+            pass
+        alvos.append(ip + ":5555")
+    saida = ""
+    for alvo in alvos:
+        avisa("conectando em %s…" % alvo)
+        _, out, err = rodar([adb, "connect", alvo], timeout=20)
+        saida = (out + "\n" + err).strip()
+        baixo = saida.lower()
+        if "failed to authenticate" in baixo or "unauthorized" in baixo:
+            return alvo, ("O aparelho %s pediu autorização: aceite “Permitir depuração” na tela dele (marque “Sempre "
+                          "permitir”). Ele entra na lista assim que você aceitar." % alvo), True
+        if conectou(saida):
+            return alvo, "conectado em %s" % alvo, False
+    alvo = alvos[-1]
+    return None, explica_falha(ip, alvo.split(":")[1], sonda(ip, alvo.split(":")[1]), saida), False
+
+
+def ip_do_wifi(saida):
+    """IPv4 do wlan0 na saida de `ip -f inet addr show wlan0`."""
+    m = re.search(r"inet (\d+\.\d+\.\d+\.\d+)/", saida or "")
+    return m.group(1) if m else None
+
+
+def ligar_wifi_pelo_cabo(rodar, adb, serial, avisa=lambda t: None, tentativas=6, pausa=1.0):
+    """Aparelho no cabo USB: liga a depuracao por rede (adb tcpip 5555) e conecta pelo IP do Wi-Fi dele.
+    Vale ate o aparelho reiniciar. Devolve (endereco | None, mensagem)."""
+    avisa("lendo o IP do Wi-Fi de %s…" % serial)
+    _, out, _ = rodar([adb, "-s", serial, "shell", "ip -f inet addr show wlan0"], timeout=10)
+    ip = ip_do_wifi(out)
+    if not ip:
+        return None, "%s não está conectado a um Wi-Fi: ligue o Wi-Fi dele na mesma rede do PC e tente de novo." % serial
+    avisa("ligando a depuração por rede de %s (porta 5555)…" % serial)
+    _, out, err = rodar([adb, "-s", serial, "tcpip", "5555"], timeout=15)
+    if "error" in (out + err).lower():
+        return None, "o aparelho recusou ligar a depuração por rede: %s" % (out + err).strip()[-150:]
+    alvo, saida = ip + ":5555", ""
+    for _ in range(tentativas):  # o adb do aparelho reinicia em modo rede: leva um instante
+        time.sleep(pausa)
+        avisa("conectando em %s…" % alvo)
+        _, out, err = rodar([adb, "connect", alvo], timeout=15)
+        saida = (out + "\n" + err).strip()
+        if conectou(saida):
+            return alvo, "conectado em %s pelo Wi-Fi: pode tirar o cabo (vale até o aparelho reiniciar)" % alvo
+    return None, "liguei a depuração por rede, mas não conectei em %s: %s" % (alvo, saida[-150:] or "sem resposta")
+
+
+class JanelaWifi:
+    """`ao_conectado(endereco, mensagem)` quando conectou (pelo IP, pareando ou pelo cabo): o app guarda o
+    endereco para reconectar sozinho. `aparelhos_usb`: [(serial, rotulo)] dos aparelhos no cabo agora."""
+
+    def __init__(self, raiz, adb, rodar, config, ao_conectado, icone=None, aparelhos_usb=()):
         self.adb, self.rodar, self.config = adb, rodar, config
-        self.ao_conectar, self.ao_parear = ao_conectar, ao_parear
+        self.ao_conectado = ao_conectado
+        self.usb = list(aparelhos_usb)
         self.q = queue.Queue()
         w = self.win = tk.Toplevel(raiz)
         w.title("Conectar pelo Wi-Fi")
@@ -156,8 +249,15 @@ class JanelaWifi:
             self._rotulo("Endereço do aparelho")
             cb = ttk.Combobox(self.corpo, textvariable=self.var_ip, values=self.ips, width=42)
             cb.pack(anchor="w", fill="x", ipady=2)
-            self._dica("IP ou IP:porta (a porta padrão é 5555). Serve para aparelho com a depuração por rede ligada "
-                       "(adb tcpip 5555). O endereço fica salvo e é reconectado sozinho.")
+            self._dica("IP do Wi-Fi do aparelho (Configurações › Wi-Fi › rede conectada), ou IP:porta. Sem porta, o Vision "
+                       "procura a da Depuração por Wi-Fi e depois tenta a 5555. O endereço fica salvo e é reconectado sozinho.")
+            if self.usb:
+                self._rotulo("Ou ligue o Wi-Fi de um aparelho que está no cabo USB", 14)
+                for serial, rotulo in self.usb[:4]:
+                    visual.Botao(self.corpo, "rede", "Ligar o Wi-Fi pelo cabo: %s" % rotulo,
+                                 comando=lambda s=serial: self._pelo_cabo(s), largura=440, altura=34).pack(anchor="w", pady=2)
+                self._dica("Liga a depuração por rede (adb tcpip 5555) e conecta pelo Wi-Fi: depois dá para tirar o cabo. "
+                           "Vale até o aparelho reiniciar.")
             self.bt_ok.define(texto="Conectar")
             cb.focus_set()
         else:
@@ -189,10 +289,7 @@ class JanelaWifi:
             txt = self.var_ip.get().strip()
             if not endereco_valido(txt):
                 return self._mostra("Endereço inválido: use algo como 192.168.1.20 ou 192.168.1.20:5555", visual.PERIGO)
-            if ":" not in txt:
-                txt += ":5555"
-            self.win.destroy()
-            return self.ao_conectar(txt)
+            return self._trabalha(lambda avisa: conectar_por_ip(self.rodar, self.adb, txt, avisa=avisa))
         par, cod, con = self.var_par.get().strip(), re.sub(r"\D", "", self.var_cod.get()), self.var_con.get().strip()
         if not endereco_valido(par, exige_porta=True):
             return self._mostra("Informe o IP e a porta de pareamento, como 192.168.1.20:37451", visual.PERIGO)
@@ -201,12 +298,21 @@ class JanelaWifi:
         if con and not endereco_valido(con, exige_porta=True):
             return self._mostra("IP e porta de conexão inválidos, como 192.168.1.20:41235", visual.PERIGO)
         self.config["ultimo_pareamento"] = par.split(":")[0] + ":"
+        self._trabalha(lambda avisa: parear_e_conectar(self.rodar, self.adb, par, cod, con, avisa=avisa))
+
+    def _pelo_cabo(self, serial):
+        if getattr(self, "ocupado", False):
+            return
+        self._trabalha(lambda avisa: ligar_wifi_pelo_cabo(self.rodar, self.adb, serial, avisa=avisa))
+
+    def _trabalha(self, funcao):
+        """Roda `funcao(avisa)` fora da interface; ela devolve (endereco | None, mensagem[, aguardando])."""
         self.bt_ok.define(desativado=True)
         self.ocupado = True
 
         def trabalho():
             try:
-                fim = parear_e_conectar(self.rodar, self.adb, par, cod, con, avisa=lambda t: self.q.put(("aviso", t)))
+                fim = funcao(lambda t: self.q.put(("aviso", t)))
             except Exception as e:  # noqa: BLE001
                 fim = (None, str(e)[:200])
             self.q.put(("fim", fim))
@@ -223,13 +329,15 @@ class JanelaWifi:
                 if tipo == "aviso":
                     self._mostra(dado, visual.ACENTO)
                 else:
-                    end, msg = dado
+                    end, msg = dado[0], dado[1]
+                    aguardando = len(dado) > 2 and dado[2]
                     self.bt_ok.define(desativado=False)
                     self.ocupado = False
                     if end:
-                        self._mostra("✔  " + msg, visual.VERDE)
-                        self.ao_parear(end)
-                        self.win.after(1200, self.win.destroy)
+                        self._mostra(("" if aguardando else "✔  ") + msg, visual.ACENTO if aguardando else visual.VERDE)
+                        self.ao_conectado(end, msg)
+                        if not aguardando:  # pedindo autorizacao: a janela fica com a instrucao
+                            self.win.after(1500, self.win.destroy)
                     else:
                         self._mostra(msg, visual.PERIGO)
             self.win.after(150, self._consome)

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.11 - sem borrões no vídeo e Wi-Fi que explica e liga pelo cabo
+
+- **Borrões no vídeo** (imagens de produtos "escorrendo" para baixo por 1 a 2 s): em aparelhos que mandam cada quadro aos pedaços (no Samsung o vídeo sai por um tty), uma pausa de mais de 35 ms no meio de um quadro fazia o Vision mostrar o quadro incompleto; os seguintes herdavam o borrão e a gravação era reaberta a cada 2 ou 3 s. Agora o Vision aprende a pausa do aparelho e passa a esperar o quadro inteiro (até 0,5 s, só no último quadro de um movimento); ao perceber um quadro incompleto, volta a mostrar o anterior e não mostra nem grava os borrados até chegar uma imagem inteira.
+- **Conectar pelo IP**: sem a porta, o Vision procura primeiro a da Depuração por Wi-Fi (Android 11+) e depois a 5555; a janela fica aberta e diz o motivo quando não conecta: o aparelho recusou (depuração por rede desligada, com o que fazer) ou não respondeu (IP ou rede errados).
+- **Ligar o Wi-Fi pelo cabo**: na janela do Wi-Fi, um clique num aparelho no USB liga a depuração por rede dele (adb tcpip 5555) e já conecta pelo Wi-Fi; depois dá para tirar o cabo.
+
 ## 2.10 - duas janelas no mesmo aparelho sem derrubar o vídeo
 
 - **O vídeo não cai mais por causa de outra janela do Vision no mesmo aparelho**: ao abrir o vídeo, o Vision encerrava todas as gravações de tela do aparelho, inclusive a de outra janela do Vision ainda aberta. As duas se derrubavam e o vídeo ia para o modo quadros ("Invalid data… avcodec_send_packet"). Agora cada gravação leva a marca da sua janela, e cada janela encerra só as suas e as que sobraram de um Vision deste PC que já fechou. Gravações de outro PC ou de outras ferramentas não são encerradas.

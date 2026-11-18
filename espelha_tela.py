@@ -86,7 +86,7 @@ import janela_config  # noqa: E402  (ligar e desligar as ferramentas da barra la
 import janela_emuladores  # noqa: E402  (Androids virtuais dentro do Vision)
 import emulador_avd  # noqa: E402
 
-VERSAO = "2.10"
+VERSAO = "2.11"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -632,6 +632,21 @@ class Captura(threading.Thread):
     LIMITE_GRAVACAO = 180  # s: o screenrecord do Android grava no maximo isso de uma vez
     ANTECEDENCIA = 6  # s antes do fim em que a proxima gravacao ja e aberta (troca sem pausa)
     QUIETO = 0.035  # s sem dados do aparelho para considerar o ultimo quadro completo e mostra-lo
+    QUIETO_MAX = 0.5  # teto da espera aprendida (so atrasa o ULTIMO quadro de um movimento, nao os do meio)
+
+    def quieto_de(self, serial):
+        """Espera para liberar o ultimo quadro neste aparelho. Comeca em QUIETO e cresce quando um quadro chega
+        aos pedacos (no Samsung o video sai por um tty e quadros grandes vem com pausas de 50+ ms no meio)."""
+        return getattr(self, "_quieto", {}).get(serial, self.QUIETO)
+
+    def _aprende_quieto(self, serial, pausa):
+        if not hasattr(self, "_quieto"):
+            self._quieto = {}
+        novo = min(self.QUIETO_MAX, max(self.quieto_de(serial) * 2, pausa * 1.5 + 0.02))
+        if novo > self.quieto_de(serial):
+            self._quieto[serial] = novo
+            self.diag.evento("o aparelho manda os quadros aos pedacos (pausa de %.0f ms no meio de um quadro): "
+                             "passo a esperar %.0f ms antes de mostrar o ultimo quadro" % (pausa * 1000, novo * 1000))
 
     def _abre_fluxo(self, serial, size, taxa, candidato=False):
         """Uma gravacao (screenrecord) com seu decodificador. Os quadros so vao para a tela se ela for
@@ -644,7 +659,9 @@ class Captura(threading.Thread):
         cmd.append("-")
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=SEM_JANELA, bufsize=0)
         f = {"proc": proc, "marca": marca, "serial": serial, "frames": 0, "erro": "", "stderr": b"", "inicio": time.time(), "candidato": candidato,
-             "t_primeiro": None, "t_fim": None, "cortados": 0}
+             "t_primeiro": None, "t_fim": None, "cortados": 0,
+             "sujo": False,  # um quadro saiu incompleto: os seguintes herdam o borrao ate um quadro-chave
+             "antes": None}  # o quadro mostrado antes da ultima liberacao (o ultimo certamente inteiro)
 
         def drena_erro():  # sem isso o pipe de erro pode encher e travar o screenrecord
             try:
@@ -656,17 +673,23 @@ class Captura(threading.Thread):
             except Exception:
                 pass
 
-        def entrega(pacotes, proc=proc, medir_fila=True):
+        def entrega(pacotes, proc=proc, liberacao=False):
             for pkt in pacotes:
                 t0 = time.perf_counter()
                 for fr in codec_ref[0].decode(pkt):
                     f["frames"] += 1
                     if f["t_primeiro"] is None:
                         f["t_primeiro"] = time.time()
+                    if f["sujo"]:
+                        if not fr.key_frame:
+                            continue  # derivado do quadro incompleto: borrado, nao vai para a tela nem para a gravacao
+                        f["sujo"] = False  # quadro-chave: a imagem esta inteira de novo
                     if self._fluxo_ativo is not f:
                         if not f["candidato"]:
                             continue  # gravacao antiga, ja substituida
                         self._fluxo_ativo = f  # a proxima gravacao assume sem pausa
+                    if liberacao:
+                        f["antes"] = self._av  # se este sair incompleto, a tela volta para o anterior
                     self._av = fr  # sem converter: so o quadro desenhado vira RGB
                     g = self.gravacao
                     if g is not None:
@@ -679,7 +702,7 @@ class Captura(threading.Thread):
                     self.seq += 1
                     # na liberacao o leitor esta parado lendo o pipe: medir a fila ali esperaria o proximo dado
                     # com a trava na mao (no Windows a leitura e a consulta do mesmo pipe vao uma de cada vez)
-                    self.diag.quadro((time.perf_counter() - t0) * 1000, diagnostico_video.bytes_na_fila(proc) if medir_fila else 0)
+                    self.diag.quadro((time.perf_counter() - t0) * 1000, 0 if liberacao else diagnostico_video.bytes_na_fila(proc))
 
         codec_ref, trava = [None], threading.Lock()
         estado = {"t_dado": 0.0, "retido": False, "liberou": False}
@@ -689,14 +712,14 @@ class Captura(threading.Thread):
             (o estado final da tela) ficaria preso no PC. Fluxo quieto por um instante = quadro completo."""
             while proc.poll() is None or estado["retido"]:
                 time.sleep(0.01)
-                if not estado["retido"] or time.perf_counter() - estado["t_dado"] < self.QUIETO:
+                if not estado["retido"] or time.perf_counter() - estado["t_dado"] < self.quieto_de(serial):
                     continue
                 with trava:
-                    if not estado["retido"] or time.perf_counter() - estado["t_dado"] < self.QUIETO:
+                    if not estado["retido"] or time.perf_counter() - estado["t_dado"] < self.quieto_de(serial):
                         continue
                     estado["retido"], estado["liberou"] = False, True
                     try:
-                        entrega(list(codec_ref[0].parse(None)), medir_fila=False)
+                        entrega(list(codec_ref[0].parse(None)), liberacao=True)
                     except Exception as e:  # noqa: BLE001
                         f["erro"] = str(e)[:120]
                 if proc.poll() is not None:
@@ -716,7 +739,15 @@ class Captura(threading.Thread):
                         break
                     with trava:
                         if estado["liberou"] and not diagnostico_video.comeca_com_inicio_de_quadro(dados):
-                            f["cortados"] += 1  # liberou no meio de um quadro: a imagem pode borrar ate o proximo quadro-chave
+                            # liberou no meio de um quadro: o que foi mostrado saiu incompleto (o borrao). Volta a
+                            # tela para o quadro anterior, segura os derivados ate um quadro-chave e espera mais
+                            # da proxima vez neste aparelho
+                            f["cortados"] += 1
+                            f["sujo"] = True
+                            self._aprende_quieto(serial, time.perf_counter() - estado["t_dado"])
+                            if self._fluxo_ativo is f and f["antes"] is not None:
+                                self._av = f["antes"]
+                                self.seq += 1
                         estado["liberou"] = False
                         try:
                             entrega(codec_ref[0].parse(dados))
@@ -824,6 +855,8 @@ class Captura(threading.Thread):
             if atual["cortados"] > cortados_vistos:
                 cortados_vistos = atual["cortados"]
                 self.diag.evento("quadro mostrado antes de chegar inteiro (rede lenta?): abro outra gravacao para limpar a imagem")
+                if serial in self._sem_sobreposicao and atual["sujo"]:
+                    break  # nao aceita duas gravacoes: reabre ja (senao a imagem ficaria parada ate o quadro-chave, 10 s)
             # perto do fim da gravacao (ou com quadro cortado): abre a proxima para emendar sem pausa
             if (proximo is None and atual["frames"] and serial not in self._sem_sobreposicao
                     and (agora - atual["inicio"] > self.LIMITE_GRAVACAO - self.ANTECEDENCIA or atual["cortados"])):
@@ -3006,43 +3039,20 @@ class App:
                 pass
 
     def conectar_ip(self):
-        janela_wifi.JanelaWifi(self.root, self.cap.adb, rodar, self.config, self._conecta_endereco, self._pareado, icone=aplica_icone)
+        usb = [(a["serial"], rotulo_aparelho(a)) for a in self.cap.aparelhos
+               if a["estado"] == "device" and ":" not in a["serial"] and not a["serial"].startswith("emulator-")]
+        janela_wifi.JanelaWifi(self.root, self.cap.adb, rodar, self.config, self._wifi_conectado, icone=aplica_icone,
+                               aparelhos_usb=usb)
 
-    def _pareado(self, endereco):
-        """Pareamento por codigo conectou: o endereco entra na lista dos salvos (reconecta sozinho)."""
+    def _wifi_conectado(self, endereco, mensagem):
+        """Conectou pelo IP, pareando ou pelo cabo: o endereco entra nos salvos (reconecta sozinho) e a lista se
+        atualiza na hora."""
         ips = [x for x in (self.config.get("ips") or []) if x != endereco]
         self.config["ips"] = ([endereco] + ips)[:5]
         salvar_config(self.config)
         self.cap.ips = list(self.config["ips"])
-        self.aviso_rapido("pareado e conectado em %s" % endereco, 5)
-
-    def _conecta_endereco(self, txt):
-        self.ocupado = "conectando em %s..." % txt
-
-        def trabalho():
-            try:
-                rc, out, err = rodar([self.cap.adb, "connect", txt], timeout=20)
-                self.resultados.put((lambda r, s: self._apos_ip(txt, s), rc, (out + "\n" + err).strip()))
-            except Exception as e:  # noqa: BLE001
-                self.resultados.put((lambda r, s: self._apos_ip(txt, s), -1, str(e)))
-
-        threading.Thread(target=trabalho, daemon=True).start()
-
-    def _apos_ip(self, ip, saida):
-        self.ocupado = ""
-        baixo = saida.lower()
-        nao_autorizado = "failed to authenticate" in baixo
-        conectou = ("connected to" in baixo) and "cannot" not in baixo and "failed" not in baixo
-        if conectou or nao_autorizado:
-            ips = [x for x in (self.config.get("ips") or []) if x != ip]
-            self.config["ips"] = ([ip] + ips)[:5]
-            salvar_config(self.config)
-            self.cap.ips = list(self.config["ips"])
-        if nao_autorizado:
-            return messagebox.showinfo("Conectar por IP", "O aparelho %s pediu autoriza\u00e7\u00e3o.\n\nAceite 'Permitir depuração' na tela dele (marque 'Sempre permitir'). Ele entra na lista assim que você aceitar." % ip)
-        if conectou:
-            return self.aviso_rapido("conectado em %s" % ip)
-        messagebox.showerror("Conectar por IP", "Não consegui conectar em %s:\n\n%s\n\nConfira se o aparelho est\u00e1 na mesma rede e com a depuração por rede (porta 5555) ligada." % (ip, saida[-300:] or "sem resposta"))
+        self.aviso_rapido(mensagem, 6)
+        self.atualizar_aparelhos()
 
     def abre_painel(self):
         if not self.cap.serial:

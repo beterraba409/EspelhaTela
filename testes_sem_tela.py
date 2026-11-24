@@ -1045,6 +1045,120 @@ class QuadroCompartilhado(unittest.TestCase):
             self.assertGreater(g.gravados, 1)
 
 
+class VigiaDoVideo(unittest.TestCase):
+    """Vision 2.12: o video parado com a tela do aparelho mudando (gravacao que parou de entregar) e reaberto."""
+
+    def test_diferenca_de_tela(self):
+        from PIL import Image, ImageDraw
+        import espelha_tela as E
+        a = Image.new("RGB", (360, 720), "white")
+        d = ImageDraw.Draw(a)
+        d.rectangle((0, 0, 360, 60), fill=(20, 30, 80))
+        b = a.copy()
+        ImageDraw.Draw(b).rectangle((20, 180, 340, 400), fill=(30, 30, 30))  # outra aba: um bloco novo na tela
+        self.assertEqual(E.diferenca_de_tela(a, a.resize((160, 320))), 0.0)  # mesma tela em outra escala (o video)
+        self.assertGreater(E.diferenca_de_tela(a, b), E.LIMITE_TELA_MUDOU)
+        self.assertEqual(E.diferenca_de_tela(a, a.rotate(90, expand=True)), 100.0)  # girou
+
+    def _stream_com_video_parado(self, diferenca):
+        import fractions
+        import threading
+        import time
+        import av
+        import numpy as np
+        import espelha_tela as E
+        enc = av.CodecContext.create("libx264", "w")
+        enc.width, enc.height, enc.pix_fmt = 176, 320, "yuv420p"
+        enc.time_base = fractions.Fraction(1, 30)
+        enc.options = {"tune": "zerolatency", "preset": "ultrafast"}
+        d = tempfile.mkdtemp()
+        dados = b""
+        for i in range(3):
+            fr = av.VideoFrame.from_ndarray(np.full((320, 176, 3), 50 * i, np.uint8), format="rgb24").reformat(format="yuv420p")
+            fr.pts = i
+            dados += b"".join(bytes(p) for p in enc.encode(fr))
+        with open(os.path.join(d, "v.h264"), "wb") as f:
+            f.write(dados)
+        falso = os.path.join(d, "aparelho.py")
+        with open(falso, "w") as f:  # manda 3 quadros e para de entregar, com o canal aberto (gravacao travada)
+            f.write("import sys, time\nsys.stdout.buffer.write(open(%r, 'rb').read()); sys.stdout.flush()\ntime.sleep(30)\n"
+                    % os.path.join(d, "v.h264"))
+        original_popen, original_parar = E.subprocess.Popen, E.parar_gravacao_remota
+        E.subprocess.Popen = lambda cmd, **k: original_popen([sys.executable, falso], **k)
+        E.parar_gravacao_remota = lambda *a, **k: None
+        cap = E.Captura("adb", "falso", 0.05)
+        cap.VIGIA = 0.6
+        cap._codificadores_lidos.add("falso")
+        cap._video_parado = lambda serial: diferenca
+        cap.serial, eventos, fim = "falso", [], {}
+        cap.diag.evento = eventos.append
+        t = threading.Thread(target=lambda: fim.setdefault("r", cap._stream(None, "4M")), daemon=True)
+        try:
+            t.start()
+            t.join(6)
+            if t.is_alive():
+                cap.parar = True
+                t.join(5)
+        finally:
+            E.subprocess.Popen, E.parar_gravacao_remota = original_popen, original_parar
+        return fim.get("r"), eventos
+
+    def test_tela_mudou_e_video_parou_reabre(self):
+        r, eventos = self._stream_com_video_parado(9.0)
+        self.assertEqual(r, "ok")  # "ok" = o ciclo reabre a gravacao
+        self.assertTrue(any(e.startswith("video parado") for e in eventos))
+
+    def test_tela_parada_de_verdade_nao_reabre(self):
+        r, eventos = self._stream_com_video_parado(0.0)
+        self.assertEqual(r, "interrompido")  # so parou porque o teste mandou
+        self.assertFalse(any(e.startswith("video parado") for e in eventos))
+
+    def test_registro_avisa_quando_nao_consegue_gravar(self):
+        import diagnostico_video as D
+        with tempfile.TemporaryDirectory() as d:
+            r = D.RegistroVideo(os.path.join(d, "video.log"))
+            r.evento("ok")
+            self.assertEqual(r.erro_escrita, "")
+            os.makedirs(os.path.join(d, "bloqueado"))
+            r.caminho = os.path.join(d, "bloqueado")  # uma pasta no lugar do arquivo: abrir falha
+            r.evento("nao grava")
+            self.assertTrue(r.erro_escrita)
+
+
+@unittest.skipUnless(os.name == "nt", "area de transferencia do Windows")
+class CopiarNoWindows(unittest.TestCase):
+    """Vision 2.12: copiar vai direto pela API do Windows (o Tk falhava calado com a area de transferencia ocupada)."""
+
+    def setUp(self):
+        import area_transferencia as A
+        self.guardado = A.ler()
+
+    def tearDown(self):
+        import area_transferencia as A
+        if self.guardado is not None:
+            A.copiar(self.guardado)  # devolve o que o usuario tinha copiado
+
+    def test_copia_espera_quem_esta_usando_e_desiste_sem_apagar(self):
+        import subprocess
+        import area_transferencia as A
+        segura = ("import ctypes, sys, time\nu = ctypes.windll.user32\nu.OpenClipboard(None)\nprint('ok', flush=True)\n"
+                  "time.sleep(float(sys.argv[1]))\nu.CloseClipboard()\n")
+        self.assertTrue(A.copiar("PB9523CA72836"))
+        self.assertEqual(A.ler(), "PB9523CA72836")
+        p = subprocess.Popen([sys.executable, "-c", segura, "0.5"], stdout=subprocess.PIPE, text=True)
+        p.stdout.readline()
+        self.assertTrue(A.copiar("2D8B55EE886C6C6A", espera=2))  # outro programa usando por 0,5 s: espera e copia
+        p.wait()
+        p.stdout.close()
+        self.assertEqual(A.ler(), "2D8B55EE886C6C6A")
+        p = subprocess.Popen([sys.executable, "-c", segura, "1.5"], stdout=subprocess.PIPE, text=True)
+        p.stdout.readline()
+        self.assertFalse(A.copiar("NAO", espera=0.4))  # ocupada demais: avisa que nao copiou
+        p.wait()
+        p.stdout.close()
+        self.assertEqual(A.ler(), "2D8B55EE886C6C6A")  # e nao apagou o que estava la
+
+
 class ConectarPeloIp(unittest.TestCase):
     """Vision 2.11: conectar pelo IP acha a porta da Depuracao por Wi-Fi, explica a falha e liga o Wi-Fi pelo cabo."""
 

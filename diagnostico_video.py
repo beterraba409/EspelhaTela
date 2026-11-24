@@ -35,6 +35,7 @@ class RegistroVideo:
         self.t_quadro = None
         self.aguardando = None  # hora do toque que ainda espera o primeiro quadro
         self.pausas_total = 0
+        self.erro_escrita = ""  # ultima falha ao gravar o arquivo (o botao Registro do video avisa)
 
     def _zera(self):
         self.n_quadros = 0
@@ -56,8 +57,9 @@ class RegistroVideo:
             agora = datetime.datetime.fromtimestamp(self.relogio()).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
             with open(self.caminho, "a", encoding="utf-8") as f:
                 f.write("%s  %s\n" % (agora, texto))
-        except OSError:
-            pass  # diagnostico nunca derruba o video
+            self.erro_escrita = ""
+        except OSError as e:
+            self.erro_escrita = str(e)[:200]  # diagnostico nunca derruba o video, mas a falha fica visivel
 
     def evento(self, texto):
         with self.lock:

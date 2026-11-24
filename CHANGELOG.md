@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.12 - vídeo que não fica parado e copiar que funciona em todo PC
+
+- **Imagem parada com a tela do aparelho mudando**: quando o vídeo fica 5 s sem quadro novo, o Vision tira uma foto leve da tela do aparelho e compara com o espelho. Se a tela mudou e o vídeo não acompanhou (a gravação de tela parou de entregar), ele reabre a gravação na hora e anota no registro. Tela parada de verdade não aciona nada.
+- **Copiar o ANDROID_ID, o serial e os textos**: a cópia vai direto para a área de transferência do Windows. Antes, se outro programa estivesse usando a área de transferência naquele instante (histórico do Win+V, Teams, área de trabalho remota), a cópia falhava calada e ainda deixava a área vazia; e o que o Vision copiava sumia quando ele fechava. Agora ele espera até 1,5 s, avisa se não conseguir e o texto fica no Windows. Vale também para o Ctrl+V no aparelho, o texto do card do Reportar bug e o que vem copiado do aparelho.
+- **Registro do vídeo**: se a janela não estiver conseguindo gravar o registro, o botão avisa o motivo (antes a falha era calada e o arquivo mandado podia ser de outro dia).
+
 ## 2.11 - sem borrões no vídeo e Wi-Fi que explica e liga pelo cabo
 
 - **Borrões no vídeo** (imagens de produtos "escorrendo" para baixo por 1 a 2 s): em aparelhos que mandam cada quadro aos pedaços (no Samsung o vídeo sai por um tty), uma pausa de mais de 35 ms no meio de um quadro fazia o Vision mostrar o quadro incompleto; os seguintes herdavam o borrão e a gravação era reaberta a cada 2 ou 3 s. Agora o Vision aprende a pausa do aparelho e passa a esperar o quadro inteiro (até 0,5 s, só no último quadro de um movimento); ao perceber um quadro incompleto, volta a mostrar o anterior e não mostra nem grava os borrados até chegar uma imagem inteira.

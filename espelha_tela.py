@@ -75,6 +75,7 @@ import atualizacao  # noqa: E402  (busca de versoes novas no GitHub)
 import apk  # noqa: E402  (pacote e versao de um APK, sem o Android SDK)
 import diagnostico_video  # noqa: E402  (registro das travadas do video)
 import arrastar  # noqa: E402  (arquivos soltos do Explorer na janela)
+import area_transferencia  # noqa: E402  (copiar para o Windows sem depender do Tk)
 import transferencia  # noqa: E402  (adb pull/push com progresso e cancelamento)
 import gravacao  # noqa: E402  (gravar a tela em .mp4 ou .gif)
 import janela_gravacao  # noqa: E402  (janela de escolha do formato e do destino da gravacao)
@@ -86,7 +87,7 @@ import janela_config  # noqa: E402  (ligar e desligar as ferramentas da barra la
 import janela_emuladores  # noqa: E402  (Androids virtuais dentro do Vision)
 import emulador_avd  # noqa: E402
 
-VERSAO = "2.11"
+VERSAO = "2.12"
 ATUALIZACAO = {  # onde o Vision busca versoes novas (Releases do GitHub)
     "repo": "beterraba409/EspelhaTela", "tag": "v", "arquivo": "Vision-Setup-", "token": False,
 }
@@ -633,6 +634,21 @@ class Captura(threading.Thread):
     ANTECEDENCIA = 6  # s antes do fim em que a proxima gravacao ja e aberta (troca sem pausa)
     QUIETO = 0.035  # s sem dados do aparelho para considerar o ultimo quadro completo e mostra-lo
     QUIETO_MAX = 0.5  # teto da espera aprendida (so atrasa o ULTIMO quadro de um movimento, nao os do meio)
+    VIGIA = 5.0  # s sem quadro novo: confere numa foto da tela se o aparelho mudou e o video nao acompanhou
+
+    def _video_parado(self, serial):
+        """O video esta sem quadros: a tela do aparelho (uma foto, screencap) ainda e a que esta no espelho?
+        Devolve a % de pontos que mudaram (diferenca_de_tela) ou None se nao deu para comparar. Tela parada de verdade: 0."""
+        mostrada = self.frame
+        if mostrada is None:
+            return None
+        try:
+            rc, out, _ = rodar(self._comando(), timeout=10, binario=True)
+            if rc != 0 or not out:
+                return None
+            return diferenca_de_tela(mostrada, self._decodifica(out))
+        except Exception:  # noqa: BLE001  sem foto (aparelho ocupado, gzip): nao decide nada
+            return None
 
     def quieto_de(self, serial):
         """Espera para liberar o ultimo quadro neste aparelho. Comeca em QUIETO e cresce quando um quadro chega
@@ -842,7 +858,7 @@ class Captura(threading.Thread):
             self._codificadores_lidos.add(serial)
             threading.Thread(target=self._registra_codificador, args=(serial,), daemon=True).start()
         self.via = "video"
-        motivo, teve_quadro, cortados_vistos = "fim", False, 0
+        motivo, teve_quadro, cortados_vistos, t_vigia = "fim", False, 0, time.time()
         while True:
             agora = time.time()
             self.diag.periodico()
@@ -883,6 +899,15 @@ class Captura(threading.Thread):
             if atual["frames"] == 0 and agora - atual["inicio"] > 12:
                 motivo = "falhou"
                 break
+            # vigia: sem quadro novo ha VIGIA s. Tela parada e normal (o Android so manda quadro quando algo muda),
+            # mas se a foto da tela nao bate com o espelho, a gravacao parou de entregar: reabre
+            if teve_quadro and agora - max(self.t_frame, t_vigia) > self.VIGIA:
+                t_vigia = agora
+                dif = self._video_parado(serial)
+                if dif is not None and dif > LIMITE_TELA_MUDOU:
+                    self.diag.evento("video parado: a tela do aparelho mudou (%.0f%% dos pontos) e nenhum quadro chegou ha %.0f s: "
+                                     "reabro a gravacao" % (dif, agora - self.t_frame))
+                    break
             if atual["frames"]:
                 self.falhas_video = 0
             elif self.falhas_video:  # nova tentativa depois de uma falha: a imagem segue por quadros
@@ -2371,9 +2396,11 @@ class PainelApp:
     def copia(self, campo):
         txt = self.valores[campo].cget("text")
         if txt and txt != "-":
-            self.win.clipboard_clear()
-            self.win.clipboard_append(txt)
-            self.rodape.configure(text="copiado: %s" % txt, fg=FG2)
+            if copia_texto(self.win, txt):
+                self.rodape.configure(text="copiado: %s" % txt, fg=FG2)
+            else:
+                self.rodape.configure(text="não consegui copiar: outro programa está usando a área de "
+                                           "transferência do Windows. Tente de novo", fg=PERIGO)
 
     def _arq_original(self):
         return os.path.join(pasta_dados(), "preparo-%s.json" % (self.serial or "aparelho"))
@@ -2508,6 +2535,38 @@ def grupos_de_apks(caminhos):
 
 
 PASTA_CAPTURAS_PADRAO = os.path.join(os.path.expanduser("~"), "Pictures", "Vision")
+
+
+LIMITE_TELA_MUDOU = 2.0  # % de pontos da miniatura que mudaram: acima disso a tela nao e mais a do espelho
+
+
+def diferenca_de_tela(a, b, tamanho=(36, 64), tons=32):
+    """% de pontos que mudaram de verdade (mais de `tons` tons) entre duas imagens da tela, em miniatura cinza:
+    ignora a perda do video e a escala. Trocar de aba no P2 da ~10%; a mesma tela, 0%; o relogio, bem menos de 2%.
+    (A media nao serve: telas com muito branco igual escondem a troca.) Orientacoes diferentes contam como 100%."""
+    ra, rb = a.width / float(max(1, a.height)), b.width / float(max(1, b.height))
+    if abs(ra - rb) > 0.15:
+        return 100.0
+    if a.width > a.height:
+        tamanho = tamanho[::-1]
+    pa = a.convert("L").resize(tamanho, Image.BILINEAR).tobytes()
+    pb = b.convert("L").resize(tamanho, Image.BILINEAR).tobytes()
+    return 100.0 * sum(1 for x, y in zip(pa, pb) if abs(x - y) > tons) / len(pa)
+
+
+def copia_texto(widget, texto):
+    """Copia para a area de transferencia do PC. No Windows vai direto pela API (com novas tentativas se
+    outro programa estiver usando a area de transferencia; o texto fica mesmo se o Vision fechar). Se nao
+    der, usa a do Tk. True se copiou."""
+    if area_transferencia.copiar(texto):
+        return True
+    try:
+        widget.clipboard_clear()
+        widget.clipboard_append(texto)
+        widget.update()  # o Tk entrega o texto ao Windows so quando processa os eventos
+        return os.name != "nt" or area_transferencia.ler(0.3) == texto
+    except tk.TclError:
+        return False
 
 
 def resumo_caminho(caminho, limite=48):
@@ -3479,10 +3538,12 @@ class App:
     def colar_no_aparelho(self):
         """Ctrl+V: o texto copiado no PC vai para a area de transferencia do aparelho e e colado
         no campo em foco (com acentos). Sem o injetor, digita so os caracteres que o adb aceita."""
-        try:
-            txt = self.root.clipboard_get()
-        except tk.TclError:
-            txt = ""
+        txt = area_transferencia.ler()  # direto do Windows, com novas tentativas se estiver ocupada
+        if txt is None:
+            try:
+                txt = self.root.clipboard_get()
+            except tk.TclError:
+                txt = ""
         txt = txt.replace("\r\n", "\n")
         if not txt:
             return self.aviso_rapido("nada para colar: a \u00e1rea de transfer\u00eancia do PC est\u00e1 vazia")
@@ -3675,10 +3736,12 @@ class App:
     def _bug_pronto(self, pasta, zipado, texto, erros):
         if not zipado:
             return messagebox.showerror("Reportar bug", "N\u00e3o consegui montar o relat\u00f3rio:\n\n%s" % "\n".join(erros), parent=self.root)
-        self.root.clipboard_clear()
-        self.root.clipboard_append(texto)
+        copiou = copia_texto(self.root, texto)
         falta = (" (sem: %s)" % ", ".join(erros)) if erros else ""
-        self.aviso_rapido("relat\u00f3rio pronto: o texto do card est\u00e1 na \u00e1rea de transfer\u00eancia%s" % falta, 10)
+        if copiou:
+            self.aviso_rapido("relat\u00f3rio pronto: o texto do card est\u00e1 na \u00e1rea de transfer\u00eancia%s" % falta, 10)
+        else:
+            self.aviso_rapido("relat\u00f3rio pronto%s; n\u00e3o consegui copiar o texto do card (ele est\u00e1 no bug.md da pasta)" % falta, 10)
         if os.name == "nt":
             subprocess.Popen(["explorer", "/select,", os.path.normpath(zipado)])
 
@@ -3796,13 +3859,11 @@ class App:
         if not txt:
             return self.aviso_rapido("não foi possível ler a \u00e1rea de transfer\u00eancia do aparelho" if falhou
                                      else "a \u00e1rea de transfer\u00eancia do aparelho est\u00e1 vazia (selecione um texto antes)", 5)
-        try:
-            if self.root.clipboard_get() == txt:
-                return  # ja esta no PC (Ctrl+C e a sincronia acharam o mesmo texto)
-        except tk.TclError:
-            pass
-        self.root.clipboard_clear()
-        self.root.clipboard_append(txt)
+        if area_transferencia.ler(0.3) == txt:
+            return  # ja esta no PC (Ctrl+C e a sincronia acharam o mesmo texto)
+        if not copia_texto(self.root, txt):
+            return self.aviso_rapido("não consegui pôr no PC o texto copiado no aparelho: outro programa está "
+                                     "usando a área de transferência do Windows", 5)
         self.aviso_rapido("copiado do aparelho para o PC: %s" % resumo_texto(txt), 3)
 
     def mudou_captura(self, _e=None):
@@ -3964,8 +4025,9 @@ class App:
         m.tk_popup(x, y)
 
     def copiar(self, texto):
-        self.root.clipboard_clear()
-        self.root.clipboard_append(texto)
+        if not copia_texto(self.root, texto):
+            return self.aviso_rapido("não consegui copiar: outro programa está usando a área de transferência "
+                                     "do Windows. Tente de novo", 5)
         self.aviso_rapido("copiado: " + texto.replace("\n", " ")[:70], 4)
 
     # ---- servidor adb (wrapper em outra porta)
@@ -4081,6 +4143,11 @@ class App:
         caminho = self.cap.diag.caminho
         if not os.path.isfile(caminho):
             self.cap.diag.evento("registro aberto pelo botao (ainda sem video nesta sessao)")
+        falha = self.cap.diag.erro_escrita
+        if falha:  # antes o registro falhava calado e o arquivo mandado era de outro dia
+            messagebox.showwarning("Registro do vídeo", "Esta janela não está conseguindo gravar o registro em:\n%s\n\n"
+                                   "Motivo: %s\n\nO arquivo que vai abrir pode não ter o que aconteceu agora." % (caminho, falha),
+                                   parent=self.root)
         try:
             subprocess.Popen(["explorer", "/select,", os.path.normpath(caminho)], env=ambiente_limpo())
         except Exception as e:  # noqa: BLE001
